@@ -8,7 +8,7 @@ pr-preview is a reusable GitHub Actions workflow for apps that run on Cloudflare
 
 Each push to a PR uploads a new version of a Worker that holds the repo's previews, with the preview alias `pr-<number>`. The link is `https://pr-<number>-<worker-name>.<subdomain>.workers.dev/`, and the comment is updated in place on every push. Pushes to the default branch update a preview named after that branch, such as `https://main-<worker-name>.<subdomain>.workers.dev/`, which the comment links for comparison. Nothing is ever deployed: the Worker's own address keeps answering 404.
 
-If an install, build or upload fails, the comment says so and keeps pointing at the last preview that worked. An optional check command (tests, a performance budget) runs after the build; its result goes in the comment and never blocks the preview.
+If an install, build or upload fails, the comment says so and keeps pointing at the last preview that worked. Each Worker has its own comment, so one repo can call pr-preview for several apps. An optional check command (tests, a performance budget) runs after the build; its result goes in the comment and never blocks the preview.
 
 The workflow has three jobs, so your repo's code never runs next to the Cloudflare token:
 
@@ -23,9 +23,9 @@ Each run reads the repo's visibility from GitHub:
 - A **private** or internal repo previews to the Worker `<worker-name>`, whose links require Cloudflare Access sign-in.
 - A **public** repo previews to a separate Worker, `<worker-name>-public`, whose links are open. Set `force-private: true` to keep a public repo's previews private.
 
-Private previews fail closed. Before uploading, pr-preview checks that the Worker's workers.dev address and its Preview URLs both redirect to Cloudflare Access sign-in, at your team domain when `access-team-domain` is set. After uploading, it checks the new link the same way. If any check fails, no link is posted and the comment says what to fix.
+Private previews fail closed. Before uploading, pr-preview checks that the Worker's workers.dev address and its Preview URLs both redirect to Cloudflare Access sign-in, at your team domain when `access-team-domain` is set. After uploading, it checks the new link the same way. If any check fails, no link is posted and the comment says what to fix. Once a private Worker exists, pr-preview never turns its workers.dev or Preview URLs back on, so turning them off closes every old link.
 
-Because private and public previews live in different Workers, making a repo public never opens its earlier private previews.
+Because private and public previews live in different Workers, making a repo public never opens its earlier private previews, and a private repo's comment never links a public preview.
 
 ## Setup
 
@@ -98,6 +98,7 @@ If Access is ever turned off, the next run posts no link and says why.
 | `install-command` | `npm ci` | Installs dependencies. |
 | `build-command` | `npm run build` | Builds the Worker and writes `wrangler-config`. |
 | `check-command` | `''` | Runs after the build. Its result goes in the comment and never blocks the preview. |
+| `check-timeout-minutes` | `10` | Time limit for `check-command`. A check that runs out of time counts as failed. |
 | `node-version` | `22` | Node.js version for install, build and check. |
 | `working-directory` | `.` | The app's folder in the repo. |
 | `d1` | `{}` | JSON mapping each D1 binding to its preview database: `database_name`, and optionally `migrations_dir` and `database_id`. Missing databases are created, and migrations are applied before each upload. Every D1 binding in the config needs an entry. |
@@ -114,7 +115,7 @@ pr-preview writes the upload's Wrangler config itself, starting from the one you
 
 - **Kept:** code settings such as the compatibility date and flags, module rules, limits, placement and observability, plus `main` and static `assets`.
 - **Replaced:** `name`, `vars` (only `preview-vars`), `d1_databases` (only the `d1` input) and the workers.dev and Preview URL settings. Your build's own `vars` never reach a preview, since they may hold production values.
-- **Dropped, and listed in the run log:** routes, custom domains, cron triggers and other settings pr-preview doesn't carry over.
+- **Dropped, and listed in the run log:** routes, custom domains, cron triggers and other settings pr-preview doesn't carry over. Source maps are never uploaded, because Wrangler would read whatever file a build's source map points to.
 - **Refused:** bindings to other resources, such as KV, R2, Durable Objects, Queues, service bindings and AI, which a preview could otherwise share with production. The run fails and the comment says which.
 
 Previews never get your production secrets: they run in their own Worker, which has none unless you add them in Cloudflare.
@@ -122,7 +123,7 @@ Previews never get your production secrets: they run in their own Worker, which 
 ## Security
 
 - Your repo's code runs only in the build job, which has no Cloudflare token and read-only access to the repo.
-- The deploy job runs only pr-preview's code at the pinned commit and the Wrangler version in its lockfile, installed without install scripts. Wrangler runs from an empty folder with a minimal environment.
+- The deploy job runs only pr-preview's code at the pinned commit and the Wrangler version in its lockfile, installed without install scripts. Wrangler runs from an empty folder with a minimal environment. Wrangler can start workerd, Cloudflare's local runtime, to profile a Worker that fails Cloudflare's startup limits; pr-preview turns workerd off in this job, so the build's code never runs next to the token.
 - Anyone who can push a branch to your repo can get a preview built and uploaded, the same trust GitHub Actions already gives them. Pull requests from forks and from Dependabot get no preview, since they get no secrets.
 - A preview Worker runs the code its PR built, with access to the preview D1 databases. A Cloudflare account used only for previews keeps that code, and the token, away from anything else.
 

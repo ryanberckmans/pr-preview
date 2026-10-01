@@ -5,9 +5,10 @@
 // Private previews fail closed: nothing is uploaded unless the Worker's workers.dev
 // address and its Preview URLs already redirect to Cloudflare Access, and the new
 // link is checked again after the upload.
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -22,9 +23,11 @@ import {
   parseVarsInput,
   patterns,
   readEnv,
+  redact,
   resolveUnder,
   setOutputs,
   sleep as defaultSleep,
+  stripAnsi,
 } from './lib/common.mjs';
 import { CloudflareApiError, createCloudflare, explainCloudflareError } from './lib/cloudflare.mjs';
 import { probeGate } from './lib/gate.mjs';
@@ -153,9 +156,29 @@ export function createWranglerRunner({ token, accountId, tempDir }) {
   };
 }
 
+const WORKERD_STUB = '#!/bin/sh\necho "workerd is turned off in pr-preview\'s deploy job." >&2\nexit 1\n';
+
+// Wrangler starts workerd, Cloudflare's local runtime, to profile a Worker that
+// fails Cloudflare's startup limits. That would run the build's code in this job,
+// and previews never need a local runtime, so workerd's binary becomes a stub.
+export function disableLocalRuntime(toolDir = TOOL_DIR) {
+  let binary;
+  try {
+    binary = createRequire(path.join(toolDir, 'package.json'))('workerd').default;
+  } catch (error) {
+    throw new UserError(`Couldn't find workerd to turn it off: ${clean(errorMessage(error), 200)}`);
+  }
+  if (typeof binary !== 'string' || !existsSync(binary)) throw new UserError("Couldn't find workerd's binary to turn it off.");
+  writeFileSync(binary, WORKERD_STUB);
+  chmodSync(binary, 0o755);
+  const check = spawnSync(binary, ['--version'], { encoding: 'utf8' });
+  if (check.status !== 1 || !String(check.stderr).includes('turned off')) throw new UserError("Couldn't turn off workerd.");
+  return binary;
+}
+
 // Wrangler's own error lines, for the message on the PR.
 export function wranglerError(tail) {
-  const lines = tail.split('\n').map((line) => line.trim());
+  const lines = stripAnsi(tail).split('\n').map((line) => line.trim());
   const errors = lines.filter((line) => /^(✘|X) \[ERROR\]/.test(line)).map((line) => line.replace(/^(✘|X) \[ERROR\]\s*/, ''));
   return clean(errors.join(' ') || lines.filter(Boolean).slice(-1)[0] || 'unknown error', 300);
 }
@@ -243,6 +266,13 @@ export async function deploy(inputs, { fetch = globalThis.fetch, sleep = default
     }
   }
   if (!info.enabled || !info.previewsEnabled) {
+    // Someone may have turned them off to close a private Worker's old links.
+    if (isPrivate) {
+      throw new UserError(
+        `workers.dev or Preview URLs are turned off for ${worker}, and pr-preview never turns them on for a private Worker.`,
+        { status: 'gate-off' },
+      );
+    }
     log.info(`Turning on workers.dev and Preview URLs for ${worker}.`);
     await step(`turning on Preview URLs for ${worker}`, () => cf.enableSubdomain(worker));
     info = (await step(`looking up the Worker ${worker}`, () => cf.worker(worker))) ?? info;
@@ -326,6 +356,7 @@ if (isMain(import.meta.url)) {
   await main(async () => {
     let inputs;
     try {
+      disableLocalRuntime();
       inputs = readInputs(process.env);
       const runWrangler = createWranglerRunner(inputs);
       const outputs = await deploy(inputs, { runWrangler });
@@ -334,7 +365,8 @@ if (isMain(import.meta.url)) {
     } catch (error) {
       const status = error instanceof UserError ? error.status : 'error';
       const message = error instanceof UserError || error instanceof CloudflareApiError ? error.message : `Unexpected error: ${errorMessage(error)}`;
-      setOutputs({ status, message: clean(message, 600) });
+      const secrets = [process.env.CLOUDFLARE_API_TOKEN, process.env.CLOUDFLARE_ACCOUNT_ID].map((value) => value?.trim());
+      setOutputs({ status, message: clean(redact(message, secrets), 600) });
       throw error;
     }
   });

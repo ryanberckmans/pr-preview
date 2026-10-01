@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { UserError } from '../scripts/lib/common.mjs';
-import { deploy, readInputs, wranglerError } from '../scripts/deploy.mjs';
+import { deploy, disableLocalRuntime, readInputs, wranglerError } from '../scripts/deploy.mjs';
 import { cfError, fakeFetch, fakeWrangler, noSleep, ok, redirect, tempDir } from './helpers.mjs';
 
 const accountId = '0123456789abcdef0123456789abcdef';
@@ -184,10 +185,21 @@ test('a public preview goes to the -public Worker, created on first use, with no
   assert.deepEqual(cf.calls.find((call) => call.method === 'POST' && call.path.endsWith('/d1/database')).body, { name: 'app-preview-db' });
 });
 
-test('Preview URLs are turned on when they are off', async (t) => {
+test('a private Worker with Preview URLs off is left alone', async (t) => {
   const cf = cloudflare({ previews: false });
-  await deploy(inputs(makeBundle(t)), { fetch: cf.fetch, sleep: noSleep, runWrangler: cf.wrangler.run });
-  assert.ok(cf.calls.some((call) => call.method === 'POST' && call.path.endsWith('/subdomain')));
+  const error = await deploy(inputs(makeBundle(t)), { fetch: cf.fetch, sleep: noSleep, runWrangler: cf.wrangler.run }).catch((e) => e);
+  assert.equal(error.status, 'gate-off');
+  assert.match(error.message, /never turns them on for a private Worker/);
+  assert.equal(cf.calls.filter((call) => call.method === 'POST').length, 0);
+  assert.equal(probes(cf.calls).length, 0);
+  assert.equal(cf.wrangler.runs.length, 0);
+});
+
+test('a public Worker gets Preview URLs turned on', async (t) => {
+  const cf = cloudflare({ worker: 'app-preview-public', previews: false });
+  const result = await deploy(inputs(makeBundle(t), { visibility: 'public', worker: 'app-preview-public' }), { fetch: cf.fetch, sleep: noSleep, runWrangler: cf.wrangler.run });
+  assert.equal(result.status, 'deployed');
+  assert.ok(cf.calls.some((call) => call.method === 'POST' && call.path.endsWith('/scripts/app-preview-public/subdomain')));
 });
 
 test('a binding the preview cannot have fails before any Cloudflare call', async (t) => {
@@ -253,4 +265,24 @@ test('readInputs re-checks everything the build job handed over', () => {
 test('wranglerError picks out Wrangler\'s error lines', () => {
   assert.equal(wranglerError('a\n✘ [ERROR] first\nb\n✘ [ERROR] second\n'), 'first second');
   assert.equal(wranglerError('just a line\n'), 'just a line');
+  // Wrangler colors its errors whatever NO_COLOR says.
+  const colored = '\u001b[31m✘ \u001b[41;31m[\u001b[41;97mERROR\u001b[41;31m]\u001b[0m \u001b[1mYour Worker exceeded the size limit.\u001b[0m\n\n🪵  Logs were written to "/tmp/x.log"\n';
+  assert.equal(wranglerError(colored), 'Your Worker exceeded the size limit.');
+});
+
+test('disableLocalRuntime turns workerd into a stub that fails', (t) => {
+  const toolDir = tempDir(t);
+  const pkg = path.join(toolDir, 'node_modules', 'workerd');
+  mkdirSync(path.join(pkg, 'lib'), { recursive: true });
+  mkdirSync(path.join(pkg, 'bin'), { recursive: true });
+  writeFileSync(path.join(toolDir, 'package.json'), '{"name":"tool","private":true}');
+  writeFileSync(path.join(pkg, 'package.json'), '{"name":"workerd","main":"lib/main.js"}');
+  writeFileSync(path.join(pkg, 'lib', 'main.js'), "module.exports = { default: require('path').join(__dirname, '..', 'bin', 'workerd-binary') };\n");
+  const binary = path.join(pkg, 'bin', 'workerd-binary');
+  writeFileSync(binary, '#!/bin/sh\necho real\n', { mode: 0o755 });
+  assert.equal(disableLocalRuntime(toolDir), binary);
+  const run = spawnSync(binary, ['serve'], { encoding: 'utf8' });
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /turned off/);
+  assert.throws(() => disableLocalRuntime(tempDir(t)), /Couldn't find workerd/);
 });

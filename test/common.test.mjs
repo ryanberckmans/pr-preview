@@ -9,8 +9,10 @@ import {
   clean,
   parseD1Input,
   parseVarsInput,
+  redact,
   resolveUnder,
   setOutputs,
+  stripAnsi,
 } from '../scripts/lib/common.mjs';
 import { parseJsonc } from '../scripts/lib/jsonc.mjs';
 import { tempDir } from './helpers.mjs';
@@ -56,6 +58,18 @@ test('parseVarsInput accepts plain values only', () => {
   assert.deepEqual(parseVarsInput('{"A":"1","B":2,"C":false}'), { A: '1', B: 2, C: false });
   assert.throws(() => parseVarsInput('{"A":{"nested":1}}'), /string, number or boolean/);
   assert.throws(() => parseVarsInput('{"a-b":"1"}'), /variable name/);
+});
+
+test('stripAnsi removes color codes', () => {
+  assert.equal(stripAnsi('\u001b[31m✘ \u001b[41;31m[\u001b[41;97mERROR\u001b[41;31m]\u001b[0m boom'), '✘ [ERROR] boom');
+});
+
+test('redact hides every copy of each secret, and ignores empty ones', () => {
+  const accountId = '0123456789abcdef0123456789abcdef';
+  assert.equal(
+    redact(`A request to /accounts/${accountId}/workers failed for ${accountId}`, [accountId, '', undefined]),
+    'A request to /accounts/***/workers failed for ***',
+  );
 });
 
 test('clean removes line breaks and control characters', () => {

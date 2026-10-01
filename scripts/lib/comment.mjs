@@ -2,7 +2,19 @@
 // cover every state.
 import { clean, patterns } from './common.mjs';
 
-export const MARKER = '<!-- pr-preview -->';
+// Each Worker has its own comment, so a repo can call pr-preview for several apps.
+// Comments from before per-Worker markers start with LEGACY_MARKER.
+export const LEGACY_MARKER = '<!-- pr-preview -->';
+
+export function markerFor(workerName) {
+  return patterns.workerName.test(workerName ?? '') ? `<!-- pr-preview:${workerName} -->` : LEGACY_MARKER;
+}
+
+export function isPreviewComment(body, workerName) {
+  if (typeof body !== 'string') return false;
+  return body.startsWith(`${markerFor(workerName)}\n`) || body.startsWith(`${LEGACY_MARKER}\n`);
+}
+
 // Only the last line counts: text from a run (the check's output) comes before it.
 const DATA_PATTERN = /\n<!-- pr-preview:data (\{[^<>\n]*\}) -->$/;
 const PREVIEW_URL = /^https:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)*\.workers\.dev\/?$/;
@@ -46,11 +58,14 @@ export function decide(r) {
   return { kind: 'deploy-failed', message: r.deployMessage };
 }
 
-// Text from a run, made inert in Markdown: no HTML, links or @-mentions.
+// Text from a run, made inert in Markdown: no HTML, links or @-mentions. A
+// zero-width space keeps GitHub from turning bare addresses into links.
 export function inline(value, max = 400) {
   return clean(value ?? '', max)
     .replace(/[\\`*_[\]<>|~]/g, (ch) => `\\${ch}`)
-    .replace(/@/g, '@​');
+    .replace(/@/g, '@\u200b')
+    .replace(/:\/\//g, ':\u200b//')
+    .replace(/\b(www)\./gi, '$1\u200b.');
 }
 
 // Text shown as inline code: one line, no backticks to end the span early.
@@ -75,9 +90,12 @@ function short(sha) {
 
 // Renders the comment. Returns { body, lastGood }, where lastGood is what the
 // hidden line now records.
-export function renderComment(state, { sha, visibility, check, lastGood, now, runUrl, setupUrl }) {
-  const lines = [MARKER];
-  let saved = lastGood;
+export function renderComment(state, { workerName, sha, visibility, check, lastGood, now, runUrl, setupUrl }) {
+  const lines = [markerFor(workerName)];
+  // A preview saved under the other visibility lives in the other Worker, and is
+  // never offered once the repo's visibility has changed.
+  const prior = lastGood?.visibility === visibility ? lastGood : undefined;
+  let saved = prior;
   const run = `([run](${runUrl}))`;
   const stillServes = (good) => `The link still serves \`${short(good.sha)}\` from ${formatTime(good.at)}: ${good.url}`;
 
@@ -97,11 +115,11 @@ export function renderComment(state, { sha, visibility, check, lastGood, now, ru
     }
     case 'build-failed':
       lines.push(`**Preview:** the ${state.stage === 'collect' ? 'build output check' : state.stage} for \`${short(sha)}\` failed ${run}.`);
-      if (lastGood) lines.push('', stillServes(lastGood));
+      if (prior) lines.push('', stillServes(prior));
       break;
     case 'deploy-failed':
       lines.push(`**Preview:** couldn't deploy \`${short(sha)}\`: ${inline(state.message || 'see the run log.')} ${run}`);
-      if (lastGood) lines.push('', stillServes(lastGood));
+      if (prior) lines.push('', stillServes(prior));
       break;
     case 'needs-access':
       lines.push(
@@ -129,7 +147,7 @@ export function renderComment(state, { sha, visibility, check, lastGood, now, ru
     }
     case 'invalid':
       lines.push(`**Preview:** the preview settings in this repo's workflow need fixing: ${inline(state.message)} ${run}`);
-      if (lastGood) lines.push('', stillServes(lastGood));
+      if (prior) lines.push('', stillServes(prior));
       break;
     default:
       throw new Error(`Unknown state ${state.kind}`);

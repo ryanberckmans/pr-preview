@@ -44,6 +44,19 @@ export function clean(value, max = 200) {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
+// Removes terminal color codes. Wrangler colors its errors even with NO_COLOR set.
+export function stripAnsi(text) {
+  return String(text).replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '');
+}
+
+// Replaces each secret in `text`. GitHub drops any step output that contains a
+// secret, so messages must not carry the account ID that Wrangler's errors include.
+export function redact(text, secrets) {
+  let result = String(text);
+  for (const secret of secrets) if (secret) result = result.split(secret).join('***');
+  return result;
+}
+
 // Escapes data for a GitHub workflow command such as ::error::.
 export function escapeCommandData(value) {
   return String(value).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');

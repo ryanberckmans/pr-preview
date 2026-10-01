@@ -1,13 +1,12 @@
 // Turns the check step's outcome and log into outputs for the PR comment.
 import { existsSync, readFileSync } from 'node:fs';
-import { isMain, main, readEnv, setOutputs } from './lib/common.mjs';
+import { isMain, main, readEnv, setOutputs, stripAnsi } from './lib/common.mjs';
 
 const MAX_LINES = 40;
 const MAX_CHARS = 3000;
 
 export function tailOf(text) {
-  const plain = text
-    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
+  const plain = stripAnsi(text)
     .replace(/\r\n?/g, '\n')
     .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '');
   let tail = plain.trimEnd().split('\n').slice(-MAX_LINES).join('\n');

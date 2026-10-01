@@ -72,6 +72,13 @@ test('every D1 binding in the build must be mapped', () => {
   assert.equal('migrations_dir' in config.d1_databases[1], false);
 });
 
+test('source maps are never uploaded, since Wrangler would follow their paths anywhere', () => {
+  const { config, dropped } = build({ ...vinext, upload_source_maps: true });
+  assert.equal(config.upload_source_maps, false);
+  assert.deepEqual(dropped, ['upload_source_maps']);
+  assert.equal(build(vinext).config.upload_source_maps, false);
+});
+
 test('the build variables never reach the preview', () => {
   const { config } = build({ ...vinext, vars: { DATA_REFRESH_ENABLED: 'true', X402_ENABLED: 'true' } }, { vars: {} });
   assert.deepEqual(config.vars, {});

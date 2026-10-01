@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
-import { MARKER } from '../scripts/lib/comment.mjs';
+import { LEGACY_MARKER } from '../scripts/lib/comment.mjs';
 import { report } from '../scripts/report.mjs';
 import { fakeFetch, jsonResponse, tempDir } from './helpers.mjs';
 
@@ -18,6 +18,7 @@ function env(t, overrides = {}) {
     GITHUB_RUN_ID: '42',
     GITHUB_STEP_SUMMARY: path.join(tempDir(t), 'summary.md'),
     TOOL_REPOSITORY: 'ryanberckmans/pr-preview',
+    IN_WORKER_NAME: 'app-preview',
     PLAN_STATUS: 'ok',
     PLAN_CONFIGURED: 'true',
     PLAN_VISIBILITY: 'private',
@@ -41,7 +42,7 @@ function github(comments) {
 }
 
 test('posts one comment, then updates it in place', async (t) => {
-  const first = github([{ id: 1, user: { login: 'ryan' }, body: `${MARKER} quoting the bot` }]);
+  const first = github([{ id: 1, user: { login: 'ryan' }, body: '<!-- pr-preview:app-preview -->\nquoting the bot' }]);
   const created = await report(env(t), { fetch: first.fetch, now: '2026-10-01T10:00:00.000Z' });
   assert.equal(created.action, 'created');
   assert.equal(first.calls.at(-1).method, 'POST');
@@ -53,6 +54,16 @@ test('posts one comment, then updates it in place', async (t) => {
   assert.match(second.calls.at(-1).url, /\/issues\/comments\/5$/);
   assert.match(updated.body, /couldn't deploy `ddddddd`: boom/);
   assert.match(updated.body, /The link still serves `ccccccc` from 2026-10-01 10:00 UTC/);
+});
+
+test('a second app in the same repo gets its own comment, and an older comment is taken over', async (t) => {
+  const other = github([{ id: 3, user: { login: 'github-actions[bot]' }, body: '<!-- pr-preview:docs-preview -->\n**Preview:** docs' }]);
+  assert.equal((await report(env(t), { fetch: other.fetch })).action, 'created');
+  const legacy = github([{ id: 4, user: { login: 'github-actions[bot]' }, body: `${LEGACY_MARKER}\n**Preview:** not set up yet.` }]);
+  const updated = await report(env(t), { fetch: legacy.fetch });
+  assert.equal(updated.action, 'updated');
+  assert.match(legacy.calls.at(-1).url, /\/issues\/comments\/4$/);
+  assert.ok(updated.body.startsWith('<!-- pr-preview:app-preview -->\n'));
 });
 
 test('writes the run summary without the hidden markers', async (t) => {

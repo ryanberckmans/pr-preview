@@ -6,7 +6,8 @@
 # Three jobs keep the Cloudflare token away from the repo's code:
 #   build  - runs the repo's install, build and check, with no Cloudflare token.
 #   deploy - uploads the build output with pr-preview's own pinned Wrangler.
-#            None of the repo's code runs in this job.
+#            None of the repo's code runs in this job, and workerd, which
+#            Wrangler could use to run it locally, is turned off.
 #   report - posts or updates the PR comment.
 name: pr-preview
 
@@ -41,6 +42,11 @@ on:
         type: string
         required: false
         default: ''
+      check-timeout-minutes:
+        description: Time limit for check-command. A check that runs out of time counts as failed.
+        type: number
+        required: false
+        default: 10
       node-version:
         description: Node.js version for install, build and check.
         type: string
@@ -201,6 +207,7 @@ jobs:
         id: check
         if: steps.plan.outputs.build == 'true' && inputs.check-command != ''
         continue-on-error: true
+        timeout-minutes: ${{ inputs.check-timeout-minutes }}
         working-directory: ${{ steps.plan.outputs.app-dir }}
         env:
           CHECK_COMMAND: ${{ inputs.check-command }}
@@ -350,6 +357,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           TOOL_REPOSITORY: ${{ job.workflow_repository }}
+          IN_WORKER_NAME: ${{ inputs.worker-name }}
           PLAN_STATUS: ${{ needs.build.outputs.status }}
           PLAN_MESSAGE: ${{ needs.build.outputs.message }}
           PLAN_CONFIGURED: ${{ needs.build.outputs.configured }}

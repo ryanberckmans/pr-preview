@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { MARKER, decide, inline, readLastGood, renderComment } from '../scripts/lib/comment.mjs';
+import { LEGACY_MARKER, decide, inline, isPreviewComment, markerFor, readLastGood, renderComment } from '../scripts/lib/comment.mjs';
 
 const sha = 'b'.repeat(40);
 const oldSha = 'a'.repeat(40);
 const url = 'https://pr-12-app-preview.acme.workers.dev/';
 const mainUrl = 'https://main-app-preview.acme.workers.dev/';
+const MARKER = markerFor('app-preview');
 const context = {
+  workerName: 'app-preview',
   sha,
   visibility: 'private',
   now: '2026-10-01T12:34:56.000Z',
@@ -36,7 +38,7 @@ test('decide maps job results to one state', () => {
 
 test('a private preview comment links the preview, main and the commit', () => {
   const { body, lastGood: saved } = renderComment(decide(success), { ...context, check: { command: 'npm test', status: 'passed' } });
-  assert.ok(body.startsWith(MARKER));
+  assert.ok(body.startsWith('<!-- pr-preview:app-preview -->\n'));
   assert.match(body, /\*\*Preview:\*\* https:\/\/pr-12-app-preview\.acme\.workers\.dev\//);
   assert.match(body, /Private: it asks you to sign in\./);
   assert.match(body, /Built from `bbbbbbb` at 2026-10-01 12:34 UTC\./);
@@ -86,7 +88,25 @@ test('setup states explain what to do next', () => {
 });
 
 test('messages from a run cannot add links, HTML or mentions', () => {
-  assert.equal(inline('[click](https://evil) <b> @ryan `x`'), '\\[click\\](https://evil) \\<b\\> @​ryan \\`x\\`');
+  assert.equal(inline('[click](https://evil) <b> @ryan `x`'), '\\[click\\](https:\u200b//evil) \\<b\\> @\u200bryan \\`x\\`');
+  assert.equal(inline('Sign in again at www.evil.example/cf or WWW.evil.example'), 'Sign in again at www\u200b.evil.example/cf or WWW\u200b.evil.example');
+});
+
+test('each Worker has its own comment, and older comments are taken over', () => {
+  assert.equal(markerFor('app-preview'), '<!-- pr-preview:app-preview -->');
+  assert.equal(markerFor('Not A Name'), LEGACY_MARKER);
+  assert.ok(isPreviewComment('<!-- pr-preview:app-preview -->\n**Preview:** x', 'app-preview'));
+  assert.ok(isPreviewComment(`${LEGACY_MARKER}\n**Preview:** x`, 'app-preview'));
+  assert.equal(isPreviewComment('<!-- pr-preview:docs-preview -->\n**Preview:** x', 'app-preview'), false);
+  assert.equal(isPreviewComment('<!-- pr-preview:app-preview-old -->\n**Preview:** x', 'app-preview'), false);
+  assert.equal(isPreviewComment(undefined, 'app-preview'), false);
+});
+
+test('a preview saved under the other visibility is never offered', () => {
+  const publicGood = { ...lastGood, visibility: 'public' };
+  const { body, lastGood: saved } = renderComment({ kind: 'build-failed', stage: 'build' }, { ...context, lastGood: publicGood });
+  assert.doesNotMatch(body, /still serves/);
+  assert.equal(saved, undefined);
 });
 
 test('readLastGood ignores anything it did not write', () => {

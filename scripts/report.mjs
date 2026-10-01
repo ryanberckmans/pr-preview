@@ -2,7 +2,7 @@
 // writes the run summary. It reads job results only; no build output reaches it
 // except the check's last lines, which it shows as plain text.
 import { appendSummary, isMain, log, main, patterns, readEnv } from './lib/common.mjs';
-import { MARKER, decide, readLastGood, renderComment } from './lib/comment.mjs';
+import { decide, isPreviewComment, readLastGood, renderComment } from './lib/comment.mjs';
 import { createGitHub } from './lib/github.mjs';
 
 const BOT_LOGIN = 'github-actions[bot]';
@@ -26,6 +26,7 @@ export function results(env) {
 }
 
 export async function report(env, { fetch, now = new Date().toISOString() } = {}) {
+  const workerName = readEnv(env, 'IN_WORKER_NAME');
   const sha = readEnv(env, 'PLAN_SHA');
   const prNumber = readEnv(env, 'PLAN_PR_NUMBER');
   const visibility = readEnv(env, 'PLAN_VISIBILITY') === 'public' ? 'public' : 'private';
@@ -49,9 +50,10 @@ export async function report(env, { fetch, now = new Date().toISOString() } = {}
   let existing = null;
   if (prNumber && patterns.prNumber.test(prNumber)) {
     github = createGitHub({ token: readEnv(env, 'GITHUB_TOKEN'), apiUrl: readEnv(env, 'GITHUB_API_URL') || undefined, repository, fetch });
-    existing = await github.findComment(prNumber, (comment) => comment?.user?.login === BOT_LOGIN && typeof comment.body === 'string' && comment.body.startsWith(MARKER));
+    existing = await github.findComment(prNumber, (comment) => comment?.user?.login === BOT_LOGIN && isPreviewComment(comment.body, workerName));
   }
   const { body } = renderComment(state, {
+    workerName,
     sha,
     visibility,
     check,

@@ -15,7 +15,6 @@ const KEEP = new Set([
   'rules',
   'find_additional_modules',
   'preserve_file_names',
-  'upload_source_maps',
   'python_modules',
   'version_metadata',
   'minify',
@@ -40,6 +39,8 @@ const REPLACED = new Set([
   'keep_vars',
   'send_metrics',
   'dependencies_instrumentation',
+  // Wrangler follows each sourceMappingURL to a file, even outside the build output.
+  'upload_source_maps',
 ]);
 
 // Dropped without comment: Wrangler's bookkeeping, settings for local tools, and
@@ -159,6 +160,7 @@ export function buildPreviewConfig(raw, { name, root, configDir, outDir, d1, var
   const dropped = [];
   const config = {};
   for (const [key, value] of Object.entries(raw)) {
+    if (key === 'upload_source_maps' && value) dropped.push(key);
     if (REPLACED.has(key)) continue;
     if (KEEP.has(key)) config[key] = structuredClone(value);
     else if (UNSUPPORTED.has(key)) {
@@ -212,6 +214,7 @@ export function buildPreviewConfig(raw, { name, root, configDir, outDir, d1, var
   config.workers_dev = true;
   config.preview_urls = true;
   config.keep_vars = false;
+  config.upload_source_maps = false;
   config.send_metrics = false;
   config.dependencies_instrumentation = { enabled: false };
   return { config, dropped, paths };
