@@ -23,7 +23,7 @@ The workflow has three jobs, so your repo's code never runs next to the Cloudfla
 Each run reads the repo's visibility from GitHub:
 
 - A **private** or internal repo previews to the Worker `<worker-name>`, whose links require Cloudflare Access sign-in.
-- A **public** repo previews to a separate Worker, `<worker-name>-public`, whose links are open. Set `force-private: true` to keep a public repo's previews private. If **Protect all Workers** is on in the account (see [Setup](#setup)), make that Worker public from its **Access** tab.
+- A **public** repo previews to a separate Worker, `<worker-name>-public`, whose links are open. Set `force-private: true` to keep a public repo's previews private. If account-wide Access is on (see [Setup](#setup)), make that Worker public from its **Access** tab.
 
 Private previews fail closed. Before uploading, pr-preview checks that the Worker's workers.dev address and its Version URLs both redirect to Cloudflare Access sign-in, at your team domain when `access-team-domain` is set. After uploading, it checks the new link the same way. If any check fails, no link is posted and the comment says what to fix. Once a private Worker exists, pr-preview never turns its workers.dev or Version URLs back on, so turning them off closes every old link.
 
@@ -40,7 +40,7 @@ Because private and public previews live in different Workers, making a repo pub
    - Account · D1 · Edit (only needed with the `d1` input)
 4. Copy the account ID from **Account details** on the **Workers & Pages** page (it is also in the dashboard URL).
 5. For private repos, set up **Cloudflare Zero Trust** and choose a team name. The Free plan is enough; its onboarding still asks for payment details, but the Free plan isn't charged. Your team domain is `<team>.cloudflareaccess.com`, and by default people sign in with their Cloudflare login.
-6. For private repos, put every Worker in the account behind sign-in: on the **Workers & Pages** page, find **Protect all Workers**, select **Enable Access**, choose **All traffic** and the **Cloudflare account** policy, then select **Apply Access**. Each Worker pr-preview creates is then protected from the start. **Previews only** isn't enough, since it leaves workers.dev addresses open.
+6. For private repos, put every Worker in the account behind sign-in: on the **Workers & Pages** page, turn on the **Cloudflare Access** card ("Apply one account-wide Access policy across your Workers", which Cloudflare's docs call Protect all Workers). If it asks, choose **All traffic** and the **Cloudflare account** policy. Each Worker pr-preview creates is then protected from the start. **Previews only** isn't enough, since it leaves workers.dev addresses open.
 
 ### 2. The repo
 
@@ -82,7 +82,7 @@ pr-preview checks out its own scripts at the commit that is running, so the SHA 
 
 ### 3. Sign-in for a new private Worker
 
-The first run in a private repo creates the Worker with a placeholder that answers 404. With **Protect all Workers** on, the Worker is behind sign-in from the start, and the run goes on to post the link. Otherwise the run stops before uploading anything, and the comment says so. Then:
+The first run in a private repo creates the Worker with a placeholder that answers 404. With account-wide Access on, the Worker is behind sign-in from the start, and the run goes on to post the link. Otherwise the run stops before uploading anything, and the comment says so. Then:
 
 1. In Cloudflare, open **Workers & Pages → `<worker-name>` → Access**.
 2. Select **Protect this Worker behind Access** and choose **All traffic**. **Previews only** leaves the workers.dev address open, so pr-preview won't post links.
