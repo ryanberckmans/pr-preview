@@ -31,7 +31,7 @@ Because private and public previews live in different Workers, making a repo pub
 
 ### 1. Cloudflare, once per account
 
-1. Use a Cloudflare account just for previews if you can. The token below can change every Worker and D1 database in its account, and preview Workers run whatever code a PR builds.
+1. Use a Cloudflare account just for previews. The token below can change every Worker and D1 database in its account, and preview Workers run whatever code a PR builds. You don't need a second login: open the account switcher (or the **Accounts** page) and select **Create Account** to add a separate Free account under your existing user.
 2. Open **Workers & Pages** in the dashboard once, so the account has a workers.dev subdomain.
 3. Create an API token under **My Profile → API Tokens → Create Token → Custom token** with these permissions, limited to that account:
    - Account · Workers Scripts · Edit
