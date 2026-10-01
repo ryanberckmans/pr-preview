@@ -1,0 +1,371 @@
+# Reusable workflow: builds the calling repo and uploads it to Cloudflare Workers
+# as a preview with its own link, then comments the link on the PR. While the repo
+# is private the link only opens after Cloudflare Access sign-in, and nothing is
+# uploaded unless that is proven first. See README.md for setup.
+#
+# Three jobs keep the Cloudflare token away from the repo's code:
+#   build  - runs the repo's install, build and check, with no Cloudflare token.
+#   deploy - uploads the build output with pr-preview's own pinned Wrangler.
+#            None of the repo's code runs in this job.
+#   report - posts or updates the PR comment.
+name: pr-preview
+
+on:
+  workflow_call:
+    inputs:
+      worker-name:
+        description: Cloudflare Worker that holds this repo's previews. Lowercase letters, digits and dashes. Public repos use "<worker-name>-public".
+        type: string
+        required: true
+      wrangler-config:
+        description: Wrangler JSON config that build-command writes, relative to working-directory. For the Cloudflare Vite plugin, dist/<worker>/wrangler.json.
+        type: string
+        required: true
+      access-team-domain:
+        description: Your Cloudflare Access team domain (<team>.cloudflareaccess.com). When set, private previews must redirect to exactly this host.
+        type: string
+        required: false
+        default: ''
+      install-command:
+        description: Installs dependencies.
+        type: string
+        required: false
+        default: npm ci
+      build-command:
+        description: Builds the Worker and writes wrangler-config.
+        type: string
+        required: false
+        default: npm run build
+      check-command:
+        description: Optional command run after the build. Its result goes in the PR comment and never blocks the preview.
+        type: string
+        required: false
+        default: ''
+      node-version:
+        description: Node.js version for install, build and check.
+        type: string
+        required: false
+        default: '22'
+      working-directory:
+        description: Folder of the app inside the repo.
+        type: string
+        required: false
+        default: '.'
+      d1:
+        description: 'JSON mapping each D1 binding to its preview database, such as {"DB":{"database_name":"my-app-preview","migrations_dir":"migrations"}}. Databases are created when missing.'
+        type: string
+        required: false
+        default: '{}'
+      preview-vars:
+        description: JSON object of the only plain-text variables previews get.
+        type: string
+        required: false
+        default: '{}'
+      force-private:
+        description: Keep previews private even when the repo is public.
+        type: boolean
+        required: false
+        default: false
+      runs-on:
+        description: Runner for the jobs.
+        type: string
+        required: false
+        default: ubuntu-24.04
+      timeout-minutes:
+        description: Time limit for the build job.
+        type: number
+        required: false
+        default: 20
+    secrets:
+      CLOUDFLARE_API_TOKEN:
+        description: Cloudflare API token with Account · Workers Scripts · Edit and Account · D1 · Edit.
+        required: false
+      CLOUDFLARE_ACCOUNT_ID:
+        description: Cloudflare account ID.
+        required: false
+    outputs:
+      url:
+        description: The preview link.
+        value: ${{ jobs.deploy.outputs.url }}
+      version-id:
+        description: The uploaded Worker version.
+        value: ${{ jobs.deploy.outputs.version-id }}
+      visibility:
+        description: private or public.
+        value: ${{ jobs.build.outputs.visibility }}
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build
+    # Fork and Dependabot pull requests get no secrets, so they get no preview.
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && github.actor != 'dependabot[bot]'
+      && github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read # to check out the repo
+    outputs:
+      run: ${{ steps.plan.outputs.run }}
+      status: ${{ steps.plan.outputs.status }}
+      message: ${{ steps.plan.outputs.message }}
+      build: ${{ steps.plan.outputs.build }}
+      configured: ${{ steps.plan.outputs.configured }}
+      missing: ${{ steps.plan.outputs.missing }}
+      visibility: ${{ steps.plan.outputs.visibility }}
+      worker: ${{ steps.plan.outputs.worker }}
+      alias: ${{ steps.plan.outputs.alias }}
+      main-alias: ${{ steps.plan.outputs.main-alias }}
+      sha: ${{ steps.plan.outputs.sha }}
+      pr-number: ${{ steps.plan.outputs.pr-number }}
+      default-branch: ${{ steps.plan.outputs.default-branch }}
+      team-domain: ${{ steps.plan.outputs.team-domain }}
+      install-outcome: ${{ steps.install.outcome }}
+      build-outcome: ${{ steps.build.outcome }}
+      check-status: ${{ steps.check-result.outputs.status }}
+      check-tail: ${{ steps.check-result.outputs.tail }}
+      # Named per attempt, so a full re-run can upload again. Re-running only the
+      # failed jobs reuses this output and the artifact from the first attempt.
+      artifact: pr-preview-${{ steps.plan.outputs.worker }}-${{ github.run_attempt }}
+    steps:
+      - name: Check which pr-preview is running
+        env:
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          if [[ ! "$WORKFLOW_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ || ! "$WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::GitHub didn't report which pr-preview commit is running (job.workflow_repository and job.workflow_sha), so pr-preview stops here. GitHub Enterprise Server doesn't provide them."
+            exit 1
+          fi
+
+      - name: Check out pr-preview
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: tool
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          package-manager-cache: false
+
+      - name: Plan
+        id: plan
+        env:
+          HAS_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+          HAS_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+          IN_WORKER_NAME: ${{ inputs.worker-name }}
+          IN_WRANGLER_CONFIG: ${{ inputs.wrangler-config }}
+          IN_ACCESS_TEAM_DOMAIN: ${{ inputs.access-team-domain }}
+          IN_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+          IN_D1: ${{ inputs.d1 }}
+          IN_PREVIEW_VARS: ${{ inputs.preview-vars }}
+          IN_FORCE_PRIVATE: ${{ inputs.force-private }}
+        run: node tool/scripts/plan.mjs
+
+      - name: Check out the repo
+        if: steps.plan.outputs.build == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.plan.outputs.sha }}
+          path: app
+          persist-credentials: false
+
+      - name: Install
+        id: install
+        if: steps.plan.outputs.build == 'true'
+        working-directory: ${{ steps.plan.outputs.app-dir }}
+        env:
+          INSTALL_COMMAND: ${{ inputs.install-command }}
+        run: eval "$INSTALL_COMMAND"
+
+      - name: Build
+        id: build
+        if: steps.plan.outputs.build == 'true'
+        working-directory: ${{ steps.plan.outputs.app-dir }}
+        env:
+          BUILD_COMMAND: ${{ inputs.build-command }}
+        run: eval "$BUILD_COMMAND"
+
+      - name: Check
+        id: check
+        if: steps.plan.outputs.build == 'true' && inputs.check-command != ''
+        continue-on-error: true
+        working-directory: ${{ steps.plan.outputs.app-dir }}
+        env:
+          CHECK_COMMAND: ${{ inputs.check-command }}
+          CHECK_LOG: ${{ runner.temp }}/pr-preview-check.log
+        run: eval "$CHECK_COMMAND" 2>&1 | tee "$CHECK_LOG"
+
+      - name: Summarize the check
+        id: check-result
+        if: always() && steps.check.outcome != '' && steps.check.outcome != 'skipped'
+        env:
+          CHECK_OUTCOME: ${{ steps.check.outcome }}
+          CHECK_LOG: ${{ runner.temp }}/pr-preview-check.log
+        run: node tool/scripts/check-result.mjs
+
+      - name: Collect the build output
+        if: steps.plan.outputs.build == 'true'
+        env:
+          APP_DIR: ${{ steps.plan.outputs.app-dir }}
+          IN_WRANGLER_CONFIG: ${{ inputs.wrangler-config }}
+          IN_D1: ${{ inputs.d1 }}
+          BUNDLE_DIR: ${{ runner.temp }}/pr-preview-bundle
+        run: node tool/scripts/bundle.mjs
+
+      - name: Hand the build output to the deploy job
+        if: steps.plan.outputs.build == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pr-preview-${{ steps.plan.outputs.worker }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pr-preview-bundle
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 1
+
+  deploy:
+    name: Deploy
+    needs: build
+    if: needs.build.outputs.build == 'true'
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 15
+    permissions:
+      contents: read # to check out pr-preview and read the branch head
+      pull-requests: read # to skip the upload when a newer commit is on the PR
+    outputs:
+      status: ${{ steps.deploy.outputs.status || steps.fresh.outputs.status }}
+      message: ${{ steps.deploy.outputs.message || steps.fresh.outputs.message }}
+      url: ${{ steps.deploy.outputs.url }}
+      main-url: ${{ steps.deploy.outputs.main-url }}
+      version-id: ${{ steps.deploy.outputs.version-id }}
+    steps:
+      - name: Check which pr-preview is running
+        env:
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          if [[ ! "$WORKFLOW_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ || ! "$WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::GitHub didn't report which pr-preview commit is running (job.workflow_repository and job.workflow_sha), so pr-preview stops here. GitHub Enterprise Server doesn't provide them."
+            exit 1
+          fi
+
+      - name: Check out pr-preview
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: tool
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Install Wrangler
+        working-directory: tool
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Check for a newer commit
+        id: fresh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PLAN_SHA: ${{ needs.build.outputs.sha }}
+          PLAN_PR_NUMBER: ${{ needs.build.outputs.pr-number }}
+          PLAN_DEFAULT_BRANCH: ${{ needs.build.outputs.default-branch }}
+        run: node tool/scripts/fresh.mjs
+
+      - name: Download the build output
+        if: steps.fresh.outputs.fresh == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.build.outputs.artifact }}
+          path: ${{ runner.temp }}/pr-preview-bundle
+
+      - name: Deploy
+        id: deploy
+        if: steps.fresh.outputs.fresh == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PLAN_VISIBILITY: ${{ needs.build.outputs.visibility }}
+          PLAN_WORKER: ${{ needs.build.outputs.worker }}
+          PLAN_ALIAS: ${{ needs.build.outputs.alias }}
+          PLAN_MAIN_ALIAS: ${{ needs.build.outputs.main-alias }}
+          PLAN_SHA: ${{ needs.build.outputs.sha }}
+          PLAN_PR_NUMBER: ${{ needs.build.outputs.pr-number }}
+          PLAN_TEAM_DOMAIN: ${{ needs.build.outputs.team-domain }}
+          IN_D1: ${{ inputs.d1 }}
+          IN_PREVIEW_VARS: ${{ inputs.preview-vars }}
+          BUNDLE_DIR: ${{ runner.temp }}/pr-preview-bundle
+        run: node tool/scripts/deploy.mjs
+
+  report:
+    name: Report
+    needs: [build, deploy]
+    if: ${{ !cancelled() && needs.build.outputs.run == 'true' }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 5
+    permissions:
+      contents: read # to check out pr-preview
+      pull-requests: write # to post the preview comment
+    steps:
+      - name: Check which pr-preview is running
+        env:
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          if [[ ! "$WORKFLOW_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ || ! "$WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::GitHub didn't report which pr-preview commit is running (job.workflow_repository and job.workflow_sha), so pr-preview stops here. GitHub Enterprise Server doesn't provide them."
+            exit 1
+          fi
+
+      - name: Check out pr-preview
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: tool
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Comment on the pull request
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TOOL_REPOSITORY: ${{ job.workflow_repository }}
+          PLAN_STATUS: ${{ needs.build.outputs.status }}
+          PLAN_MESSAGE: ${{ needs.build.outputs.message }}
+          PLAN_CONFIGURED: ${{ needs.build.outputs.configured }}
+          PLAN_MISSING: ${{ needs.build.outputs.missing }}
+          PLAN_VISIBILITY: ${{ needs.build.outputs.visibility }}
+          PLAN_SHA: ${{ needs.build.outputs.sha }}
+          PLAN_PR_NUMBER: ${{ needs.build.outputs.pr-number }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          INSTALL_OUTCOME: ${{ needs.build.outputs.install-outcome }}
+          BUILD_OUTCOME: ${{ needs.build.outputs.build-outcome }}
+          CHECK_COMMAND: ${{ inputs.check-command }}
+          CHECK_STATUS: ${{ needs.build.outputs.check-status }}
+          CHECK_TAIL: ${{ needs.build.outputs.check-tail }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          DEPLOY_STATUS: ${{ needs.deploy.outputs.status }}
+          DEPLOY_MESSAGE: ${{ needs.deploy.outputs.message }}
+          DEPLOY_URL: ${{ needs.deploy.outputs.url }}
+          DEPLOY_MAIN_URL: ${{ needs.deploy.outputs.main-url }}
+        run: node tool/scripts/report.mjs

@@ -1,0 +1,49 @@
+# Runs pr-preview on the small Worker in test/fixture, the way a repo would use it.
+# Without the Cloudflare secrets it only checks the not-set-up path.
+name: Self-test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: self-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    uses: $/.github/workflows/preview.yml
+    permissions:
+      contents: read # to check out the repo
+      pull-requests: write # to post the preview comment
+    with:
+      worker-name: pr-preview-self-test
+      working-directory: test/fixture
+      wrangler-config: dist/worker/wrangler.json
+      check-command: node check.mjs
+      d1: '{"DB":{"database_name":"pr-preview-self-test","migrations_dir":"migrations"}}'
+      preview-vars: '{"GREETING":"from the pr-preview self-test"}'
+    secrets:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+  verify:
+    name: Open the preview
+    needs: preview
+    # This repo is public, so its previews are too and can be opened without sign-in.
+    if: needs.preview.outputs.visibility == 'public' && needs.preview.outputs.url != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check the page, the D1 binding and the preview variable
+        env:
+          URL: ${{ needs.preview.outputs.url }}
+        run: |
+          curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 5 "$URL" | grep -q 'Built from'
+          curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 5 "${URL}api/health" \
+            | jq -e '.ok == true and .greeting == "from the pr-preview self-test" and (.visits | type) == "number"'

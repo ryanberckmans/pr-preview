@@ -1,0 +1,17 @@
+{
+  "name": "pr-preview",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Reusable GitHub workflow that gives every pull request a live preview link on Cloudflare Workers, private while the repo is private.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "wrangler": "4.138.0"
+  }
+}

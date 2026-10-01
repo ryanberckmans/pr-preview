@@ -1,0 +1,10 @@
+{
+  "name": "pr-preview-placeholder",
+  "main": "index.js",
+  "no_bundle": true,
+  "compatibility_date": "2026-09-01",
+  "workers_dev": true,
+  "preview_urls": true,
+  "observability": { "enabled": false },
+  "send_metrics": false
+}

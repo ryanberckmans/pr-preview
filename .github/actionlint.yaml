@@ -1,0 +1,10 @@
+# actionlint 1.7.12 predates two GitHub Actions features this repo uses:
+# - the job.workflow_* context (September 2026), which pr-preview uses to check out
+#   its own pinned code;
+# - self-repository `uses: $/...` references (July 2026), which the self-test uses
+#   to call the workflow at the commit under test.
+paths:
+  .github/workflows/**/*.yml:
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined in object type'
+      - 'reusable workflow call "\$/\.github/workflows/[a-z-]+\.yml" at "uses" is not following the format'
