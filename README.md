@@ -40,7 +40,7 @@ Because private and public previews live in different Workers, making a repo pub
    - Account · D1 · Edit (only needed with the `d1` input)
 4. Copy the account ID from **Account details** on the **Workers & Pages** page (it is also in the dashboard URL).
 5. For private repos, set up **Cloudflare Zero Trust** and choose a team name. The Free plan is enough; its onboarding still asks for payment details, but the Free plan isn't charged. Your team domain is `<team>.cloudflareaccess.com`, and by default people sign in with their Cloudflare login.
-6. For private repos, put every Worker in the account behind sign-in: on the **Workers & Pages** page, turn on the **Cloudflare Access** card ("Apply one account-wide Access policy across your Workers", which Cloudflare's docs call Protect all Workers). If it asks, choose **All traffic** and the **Cloudflare account** policy. Each Worker pr-preview creates is then protected from the start. **Previews only** isn't enough, since it leaves workers.dev addresses open.
+6. For private repos, put every Worker in the account behind sign-in: on the **Workers & Pages** page, turn on the **Cloudflare Access** card ("Apply one account-wide Access policy across your Workers", which Cloudflare's docs call Protect all Workers). In its dialog, choose **All traffic** (it defaults to **Previews only**, which leaves workers.dev addresses open), add the **Cloudflare account** policy, then select **Enable Access**. Each Worker pr-preview creates is then protected from the start. Avoid the **Email domain** policy with a public email domain such as gmail.com, since it lets in everyone with an address there.
 
 ### 2. The repo
 
