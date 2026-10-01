@@ -118,7 +118,8 @@ if (isMain(import.meta.url)) {
     if (outputs.status === 'invalid') throw new UserError(outputs.message);
     log.info(`Preview ${outputs.alias} of ${outputs.sha.slice(0, 7)} on Worker ${outputs.worker} (${outputs.visibility}).`);
     if (outputs.configured !== 'true') {
-      log.warning(`No preview yet: add the ${outputs.missing} secret(s) to this repository. See the pr-preview README.`);
+      const missing = outputs.missing.split(' ');
+      log.warning(`No preview yet: add the ${missing.join(' and ')} repository secret${missing.length > 1 ? 's' : ''}. See the pr-preview README.`);
     }
   });
 }
