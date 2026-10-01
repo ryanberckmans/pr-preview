@@ -137,7 +137,7 @@ Previews get no secrets. They run in their own Worker, and pr-preview creates th
 - Each D1 binding has one preview database, shared by every PR and the default branch, so a migration in one PR applies to all of them.
 - Worker Previews are an open beta. Cloudflare has open reports of a deleted preview's link still answering for hours ([workers-sdk#15945](https://github.com/cloudflare/workers-sdk/issues/15945)); a private preview's link still requires sign-in meanwhile.
 - A Worker keeps at most 100 previews on Cloudflare's Free plan (500 on paid plans). Beyond that, Cloudflare deletes the least recently updated one.
-- Links made by pr-preview before it used Worker Previews are aliased Version URLs, which Cloudflare can't delete one at a time. Deleting the preview Worker (**Workers & Pages → `<worker-name>` → Settings → Delete**) removes them all, and the next run creates the Worker again. Without account-wide Access, protect the new Worker as in [step 3](#3-sign-in-for-a-new-private-worker).
+- Links made by pr-preview before it used Worker Previews are aliased Version URLs. Cloudflare can't delete them one at a time, and doesn't document which of the two answers when a new preview has the same name. When upgrading, change `worker-name` so previews start in a new Worker; open pull requests keep their old links until their next push. Delete the old Worker (**Workers & Pages → old Worker → Settings → Delete**) once you no longer need those links. Without account-wide Access, protect the new Worker as in [step 3](#3-sign-in-for-a-new-private-worker).
 - In private repos, the runs use the repo owner's GitHub Actions minutes.
 
 ## Development
