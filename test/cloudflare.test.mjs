@@ -44,7 +44,7 @@ test('reads a Worker\'s workers.dev settings', async () => {
   });
 });
 
-test('turns on workers.dev and Preview URLs with the script API date header', async () => {
+test('turns on workers.dev and Version URLs with the script API date header', async () => {
   const { fetch, calls } = fakeFetch([['POST', `${base}/workers/scripts/app-preview/subdomain`, () => ok({ enabled: true, previews_enabled: true })]]);
   await client(fetch).enableSubdomain('app-preview');
   assert.deepEqual(calls[0].body, { enabled: true, previews_enabled: true });

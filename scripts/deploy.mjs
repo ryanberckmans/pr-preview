@@ -3,8 +3,8 @@
 // repo's code runs here.
 //
 // Private previews fail closed: nothing is uploaded unless the Worker's workers.dev
-// address and its Preview URLs already redirect to Cloudflare Access, and the new
-// link is checked again after the upload.
+// address and its Version URLs (Cloudflare's former Preview URLs) already redirect
+// to Cloudflare Access, and the new link is checked again after the upload.
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
@@ -245,7 +245,8 @@ export async function deploy(inputs, { fetch = globalThis.fetch, sleep = default
   }
 
   let info = await step(`looking up the Worker ${worker}`, () => cf.worker(worker));
-  if (!info) {
+  const created = !info;
+  if (created) {
     log.info(`Creating the Worker ${worker} with a placeholder that answers 404.`);
     await wranglerOrThrow(
       runWrangler,
@@ -258,23 +259,17 @@ export async function deploy(inputs, { fetch = globalThis.fetch, sleep = default
       info = await step(`looking up the Worker ${worker}`, () => cf.worker(worker));
     }
     if (!info) throw new UserError(`Created the Worker ${worker}, but Cloudflare doesn't list it yet. Re-run in a minute.`);
-    if (isPrivate) {
-      throw new UserError(
-        `pr-preview created the Worker ${worker} on Cloudflare. Turn on Cloudflare Access for its workers.dev and Preview URLs and allow only your email, then re-run this workflow.`,
-        { status: 'needs-access' },
-      );
-    }
   }
   if (!info.enabled || !info.previewsEnabled) {
     // Someone may have turned them off to close a private Worker's old links.
     if (isPrivate) {
       throw new UserError(
-        `workers.dev or Preview URLs are turned off for ${worker}, and pr-preview never turns them on for a private Worker.`,
+        `workers.dev or Version URLs are turned off for ${worker}, and pr-preview never turns them on for a private Worker.`,
         { status: 'gate-off' },
       );
     }
-    log.info(`Turning on workers.dev and Preview URLs for ${worker}.`);
-    await step(`turning on Preview URLs for ${worker}`, () => cf.enableSubdomain(worker));
+    log.info(`Turning on workers.dev and Version URLs for ${worker}.`);
+    await step(`turning on Version URLs for ${worker}`, () => cf.enableSubdomain(worker));
     info = (await step(`looking up the Worker ${worker}`, () => cf.worker(worker))) ?? info;
   }
 
@@ -283,19 +278,27 @@ export async function deploy(inputs, { fetch = globalThis.fetch, sleep = default
   const aliasUrl = `https://${alias}${suffix}/`;
   const mainUrl = `https://${mainAlias}${suffix}/`;
 
-  const requireGate = async (url, label, attempts) => {
+  const requireGate = async (url, label, attempts, { justCreated = false } = {}) => {
     const verdict = await probeGate(url, { teamDomain, fetch, sleep, attempts });
     log.info(`Sign-in check, ${label}: ${verdict.reason}.`);
-    if (!verdict.gated) {
-      throw new UserError(`The ${label} of ${worker} ${verdict.reason}, so it isn't behind Cloudflare Access.`, { status: 'gate-off' });
+    if (verdict.gated) return;
+    if (justCreated) {
+      throw new UserError(
+        `pr-preview created the Worker ${worker}, and its ${label} ${verdict.reason}. Put it behind Cloudflare Access (Workers & Pages → ${worker} → Access → All traffic), then re-run this workflow.`,
+        { status: 'needs-access' },
+      );
     }
+    throw new UserError(`The ${label} of ${worker} ${verdict.reason}, so it isn't behind Cloudflare Access.`, { status: 'gate-off' });
   };
 
   if (isPrivate) {
-    await requireGate(workersDevUrl, 'workers.dev address', 3);
+    // A Worker this run created is only behind Access already if the account
+    // protects all its Workers; a new host also takes a few more seconds to answer.
+    const attempts = created ? 6 : 3;
+    await requireGate(workersDevUrl, 'workers.dev address', attempts, { justCreated: created });
     const deployed = await step(`reading the deployments of ${worker}`, () => cf.deployedVersionId(worker));
-    if (deployed && /^[0-9a-f]{8}/.test(deployed)) await requireGate(`https://${deployed.slice(0, 8)}${suffix}/`, 'Preview URLs', 3);
-    else await requireGate(aliasUrl, 'Preview URLs', 3);
+    const versionHost = deployed && /^[0-9a-f]{8}/.test(deployed) ? `https://${deployed.slice(0, 8)}${suffix}/` : aliasUrl;
+    await requireGate(versionHost, 'Version URLs', attempts, { justCreated: created });
   }
 
   const ids = {};
@@ -337,7 +340,7 @@ export async function deploy(inputs, { fetch = globalThis.fetch, sleep = default
   if (typeof versionId !== 'string' || !/^[0-9a-f-]{8,}$/.test(versionId)) throw new UserError('Wrangler finished without reporting the new version.');
   const versionUrl = typeof result.preview_url === 'string' && WORKERS_DEV_URL.test(result.preview_url) ? hostUrl(result.preview_url) : undefined;
   if (!result.preview_alias_url) {
-    throw new UserError(`Cloudflare didn't create a preview link for version ${versionId.slice(0, 8)}. Check that Preview URLs are on for ${worker}.`);
+    throw new UserError(`Cloudflare didn't create a preview link for version ${versionId.slice(0, 8)}. Check that Version URLs are on for ${worker}.`);
   }
   if (hostUrl(result.preview_alias_url) !== aliasUrl) {
     log.warning(`Wrangler reported the link ${clean(result.preview_alias_url)} instead of ${aliasUrl}; using Wrangler's.`);

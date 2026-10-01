@@ -8,6 +8,8 @@ pr-preview is a reusable GitHub Actions workflow for apps that run on Cloudflare
 
 Each push to a PR uploads a new version of a Worker that holds the repo's previews, with the preview alias `pr-<number>`. The link is `https://pr-<number>-<worker-name>.<subdomain>.workers.dev/`, and the comment is updated in place on every push. Pushes to the default branch update a preview named after that branch, such as `https://main-<worker-name>.<subdomain>.workers.dev/`, which the comment links for comparison. Nothing is ever deployed: the Worker's own address keeps answering 404.
 
+Cloudflare calls these links aliased Version URLs. Its docs steer branch testing toward its newer Worker Previews, since a Version URL doesn't isolate a branch from production resources. Here the Worker and its D1 databases exist only for previews, so there are no production resources to share.
+
 If an install, build or upload fails, the comment says so and keeps pointing at the last preview that worked. Each Worker has its own comment, so one repo can call pr-preview for several apps. An optional check command (tests, a performance budget) runs after the build; its result goes in the comment and never blocks the preview.
 
 The workflow has three jobs, so your repo's code never runs next to the Cloudflare token:
@@ -21,9 +23,9 @@ The workflow has three jobs, so your repo's code never runs next to the Cloudfla
 Each run reads the repo's visibility from GitHub:
 
 - A **private** or internal repo previews to the Worker `<worker-name>`, whose links require Cloudflare Access sign-in.
-- A **public** repo previews to a separate Worker, `<worker-name>-public`, whose links are open. Set `force-private: true` to keep a public repo's previews private.
+- A **public** repo previews to a separate Worker, `<worker-name>-public`, whose links are open. Set `force-private: true` to keep a public repo's previews private. If **Protect all Workers** is on in the account (see [Setup](#setup)), make that Worker public from its **Access** tab.
 
-Private previews fail closed. Before uploading, pr-preview checks that the Worker's workers.dev address and its Preview URLs both redirect to Cloudflare Access sign-in, at your team domain when `access-team-domain` is set. After uploading, it checks the new link the same way. If any check fails, no link is posted and the comment says what to fix. Once a private Worker exists, pr-preview never turns its workers.dev or Preview URLs back on, so turning them off closes every old link.
+Private previews fail closed. Before uploading, pr-preview checks that the Worker's workers.dev address and its Version URLs both redirect to Cloudflare Access sign-in, at your team domain when `access-team-domain` is set. After uploading, it checks the new link the same way. If any check fails, no link is posted and the comment says what to fix. Once a private Worker exists, pr-preview never turns its workers.dev or Version URLs back on, so turning them off closes every old link.
 
 Because private and public previews live in different Workers, making a repo public never opens its earlier private previews, and a private repo's comment never links a public preview.
 
@@ -36,8 +38,9 @@ Because private and public previews live in different Workers, making a repo pub
 3. Create an API token under **My Profile → API Tokens → Create Token → Custom token** with these permissions, limited to that account:
    - Account · Workers Scripts · Edit
    - Account · D1 · Edit (only needed with the `d1` input)
-4. Copy the account ID from **Workers & Pages** (it is also in the dashboard URL).
-5. For private repos, set up **Cloudflare Zero Trust** (the Free plan is enough) and choose a team name. Your team domain is `<team>.cloudflareaccess.com`. Sign-in with a one-time PIN sent by email works without further setup.
+4. Copy the account ID from **Account details** on the **Workers & Pages** page (it is also in the dashboard URL).
+5. For private repos, set up **Cloudflare Zero Trust** and choose a team name. The Free plan is enough; its onboarding still asks for payment details, but the Free plan isn't charged. Your team domain is `<team>.cloudflareaccess.com`, and by default people sign in with their Cloudflare login.
+6. For private repos, put every Worker in the account behind sign-in: on the **Workers & Pages** page, find **Protect all Workers**, select **Enable Access**, choose **All traffic** and the **Cloudflare account** policy, then select **Apply Access**. Each Worker pr-preview creates is then protected from the start. **Previews only** isn't enough, since it leaves workers.dev addresses open.
 
 ### 2. The repo
 
@@ -77,14 +80,14 @@ jobs:
 
 pr-preview checks out its own scripts at the commit that is running, so the SHA pins everything that handles the token.
 
-### 3. Sign-in, once per private repo
+### 3. Sign-in for a new private Worker
 
-The first run in a private repo creates the Worker with a placeholder that answers 404, then stops: nothing is uploaded until sign-in is enforced, and the comment says so. Then:
+The first run in a private repo creates the Worker with a placeholder that answers 404. With **Protect all Workers** on, the Worker is behind sign-in from the start, and the run goes on to post the link. Otherwise the run stops before uploading anything, and the comment says so. Then:
 
-1. In Cloudflare, open **Workers & Pages → `<worker-name>` → Settings → Domains & Routes**.
-2. Turn on **Cloudflare Access** for **workers.dev** and for **Preview URLs**.
-3. Under **Manage Cloudflare Access**, check that each policy allows only the people who should see previews, such as your own email.
-4. Re-run the workflow. The comment now has the link.
+1. In Cloudflare, open **Workers & Pages → `<worker-name>` → Access**.
+2. Select **Protect this Worker behind Access** and choose **All traffic**. **Previews only** leaves the workers.dev address open, so pr-preview won't post links.
+3. Under **Authentication policy**, choose **Cloudflare account**, so only members of the account can sign in.
+4. Select **Apply Access**, then re-run the workflow. The comment now has the link.
 
 If Access is ever turned off, the next run posts no link and says why.
 
@@ -114,7 +117,7 @@ Outputs: `url` (the preview link), `version-id` and `visibility`.
 pr-preview writes the upload's Wrangler config itself, starting from the one your build wrote:
 
 - **Kept:** code settings such as the compatibility date and flags, module rules, limits, placement and observability, plus `main` and static `assets`.
-- **Replaced:** `name`, `vars` (only `preview-vars`), `d1_databases` (only the `d1` input) and the workers.dev and Preview URL settings. Your build's own `vars` never reach a preview, since they may hold production values.
+- **Replaced:** `name`, `vars` (only `preview-vars`), `d1_databases` (only the `d1` input) and the workers.dev and Version URL settings. Your build's own `vars` never reach a preview, since they may hold production values.
 - **Dropped, and listed in the run log:** routes, custom domains, cron triggers and other settings pr-preview doesn't carry over. Source maps are never uploaded, because Wrangler would read whatever file a build's source map points to.
 - **Refused:** bindings to other resources, such as KV, R2, Durable Objects, Queues, service bindings and AI, which a preview could otherwise share with production. The run fails and the comment says which.
 

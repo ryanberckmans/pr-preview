@@ -138,17 +138,35 @@ test('a private preview is uploaded only after the gate is proven, then checked 
 });
 
 test('a missing private Worker is created as a placeholder, and nothing is uploaded until Access is on', async (t) => {
-  const cf = cloudflare({ exists: false });
+  const cf = cloudflare({ exists: false, gate: 'off' });
   const error = await deploy(inputs(makeBundle(t)), { fetch: cf.fetch, sleep: noSleep, runWrangler: cf.wrangler.run }).catch((e) => e);
   assert.ok(error instanceof UserError);
   assert.equal(error.status, 'needs-access');
+  assert.match(error.message, /workers\.dev address answered 200 without sign-in\. Put it behind Cloudflare Access \(Workers & Pages → app-preview → Access → All traffic\)/);
   assert.equal(cf.wrangler.runs.length, 1);
   const args = cf.wrangler.runs[0].args;
   assert.equal(args[0], 'deploy');
   assert.equal(args[args.indexOf('--name') + 1], 'app-preview');
   assert.ok(args[args.indexOf('--config') + 1].endsWith(path.join('placeholder', 'wrangler.json')));
-  assert.equal(probes(cf.calls).length, 0);
+  assert.equal(probes(cf.calls).length, 1);
   assert.equal(cf.calls.filter((call) => call.path.endsWith('/d1/database')).length, 0);
+});
+
+test('a new private Worker in an account that protects all Workers gets its preview on the first run', async (t) => {
+  const cf = cloudflare({ exists: false });
+  const result = await deploy(inputs(makeBundle(t)), { fetch: cf.fetch, sleep: noSleep, runWrangler: cf.wrangler.run });
+  assert.equal(result.status, 'deployed');
+  assert.equal(result.url, 'https://pr-12-app-preview.acme.workers.dev/');
+  assert.deepEqual(cf.wrangler.runs.map((run) => run.args[0]), ['deploy', 'd1', 'versions']);
+  const hosts = probes(cf.calls).map((call) => new URL(call.url).hostname.split('.')[0]);
+  assert.deepEqual(hosts, ['app-preview', '11112222-app-preview', 'pr-12-app-preview', 'abcdef12-app-preview']);
+});
+
+test('a new private Worker whose new link opens without sign-in still fails as blocked', async (t) => {
+  const cf = cloudflare({ exists: false, afterUpload: 'off' });
+  const error = await deploy(inputs(makeBundle(t)), { fetch: cf.fetch, sleep: noSleep, runWrangler: cf.wrangler.run }).catch((e) => e);
+  assert.equal(error.status, 'gate-off');
+  assert.match(error.message, /new preview link/);
 });
 
 test('an open private Worker stops everything before the upload', async (t) => {
@@ -185,7 +203,7 @@ test('a public preview goes to the -public Worker, created on first use, with no
   assert.deepEqual(cf.calls.find((call) => call.method === 'POST' && call.path.endsWith('/d1/database')).body, { name: 'app-preview-db' });
 });
 
-test('a private Worker with Preview URLs off is left alone', async (t) => {
+test('a private Worker with Version URLs off is left alone', async (t) => {
   const cf = cloudflare({ previews: false });
   const error = await deploy(inputs(makeBundle(t)), { fetch: cf.fetch, sleep: noSleep, runWrangler: cf.wrangler.run }).catch((e) => e);
   assert.equal(error.status, 'gate-off');
@@ -195,7 +213,7 @@ test('a private Worker with Preview URLs off is left alone', async (t) => {
   assert.equal(cf.wrangler.runs.length, 0);
 });
 
-test('a public Worker gets Preview URLs turned on', async (t) => {
+test('a public Worker gets Version URLs turned on', async (t) => {
   const cf = cloudflare({ worker: 'app-preview-public', previews: false });
   const result = await deploy(inputs(makeBundle(t), { visibility: 'public', worker: 'app-preview-public' }), { fetch: cf.fetch, sleep: noSleep, runWrangler: cf.wrangler.run });
   assert.equal(result.status, 'deployed');

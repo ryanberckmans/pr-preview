@@ -133,7 +133,7 @@ export function renderComment(state, { workerName, sha, visibility, check, lastG
       lines.push(
         `**Preview:** blocked, so no link was posted. ${inline(state.message)} ${run}`,
         '',
-        `Turn Cloudflare Access back on for the preview Worker's workers.dev and Preview URLs, then re-run. [Setup steps](${setupUrl})`,
+        `Check that Cloudflare Access protects the preview Worker for all traffic and that its workers.dev and Version URLs are on, then re-run. [Setup steps](${setupUrl})`,
       );
       saved = undefined;
       break;
