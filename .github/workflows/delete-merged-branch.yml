@@ -1,0 +1,55 @@
+# Deletes a pull request's branch once the pull request is merged, including
+# pull requests landed by pushing their commits to the base branch. A branch is
+# kept if it got new commits after the merge or another open pull request comes
+# from it. Open pull requests based on it move to the branch it was merged into.
+name: Delete merged branch
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions: {}
+
+jobs:
+  delete:
+    name: Delete the merged branch
+    if: >-
+      github.event.pull_request.merged &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref != github.event.repository.default_branch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write # to delete the branch
+      pull-requests: write # to move pull requests based on it
+    steps:
+      - name: Delete the branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+          MERGED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          ref="heads/$(jq -rn --arg b "$BRANCH" '$b | split("/") | map(@uri) | join("/")')"
+          if ! sha=$(gh api "repos/$REPO/git/ref/$ref" --jq .object.sha 2>/dev/null); then
+            echo "$BRANCH is already deleted."
+            exit 0
+          fi
+          if [ "$sha" != "$MERGED_SHA" ]; then
+            echo "::notice::Kept $BRANCH: it has commits from after the merge."
+            exit 0
+          fi
+          if [ "$(gh pr list --repo "$REPO" --head "$BRANCH" --state open --json number --jq length)" != 0 ]; then
+            echo "::notice::Kept $BRANCH: another open pull request comes from it."
+            exit 0
+          fi
+          # GitHub closes open pull requests whose base branch is deleted, so first
+          # move them onto the branch this one was merged into, as GitHub's own
+          # branch deletion does.
+          for number in $(gh pr list --repo "$REPO" --base "$BRANCH" --state open --limit 100 --json number --jq '.[].number'); do
+            gh api --method PATCH "repos/$REPO/pulls/$number" -f base="$BASE" --silent
+            echo "Moved #$number onto $BASE."
+          done
+          gh api --method DELETE "repos/$REPO/git/refs/$ref" --silent
+          echo "Deleted $BRANCH."
