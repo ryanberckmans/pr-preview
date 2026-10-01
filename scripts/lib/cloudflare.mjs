@@ -1,5 +1,6 @@
 // The few Cloudflare API calls pr-preview makes itself. Uploads and migrations go
-// through Wrangler; these calls find or create the Worker and D1 databases.
+// through Wrangler; these calls find or create the Worker and D1 databases, and
+// delete previews.
 import { UserError, clean, patterns, sleep as defaultSleep } from './common.mjs';
 
 const API_BASE = 'https://api.cloudflare.com/client/v4';
@@ -71,6 +72,7 @@ export function createCloudflare({ token, accountId, fetch: fetchImpl = globalTh
         lastError = new CloudflareApiError(response.status, json?.errors, path);
         continue;
       }
+      if (response.status === 204) return {};
       if (!response.ok || !json || json.success === false) throw new CloudflareApiError(response.status, json?.errors, path);
       return json;
     }
@@ -120,6 +122,17 @@ export function createCloudflare({ token, accountId, fetch: fetchImpl = globalTh
       const versions = result?.deployments?.[0]?.versions ?? [];
       const top = [...versions].sort((a, b) => (b?.percentage ?? 0) - (a?.percentage ?? 0))[0];
       return typeof top?.version_id === 'string' ? top.version_id : null;
+    },
+
+    // Deletes a Worker Preview with all its deployments. False when there was none.
+    async deletePreview(worker, name) {
+      try {
+        await call('DELETE', `${account}/workers/workers/${worker}/previews/${encodeURIComponent(name)}`);
+        return true;
+      } catch (error) {
+        if (error instanceof CloudflareApiError && (error.status === 404 || error.hasCode(10007, 10025, 10090))) return false;
+        throw error;
+      }
     },
 
     async findD1(name) {

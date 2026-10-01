@@ -1,14 +1,16 @@
 # Reusable workflow: builds the calling repo and uploads it to Cloudflare Workers
-# as a preview with its own link, then comments the link on the PR. While the repo
-# is private the link only opens after Cloudflare Access sign-in, and nothing is
-# uploaded unless that is proven first. See README.md for setup.
+# as a preview with its own link, then comments the link on the PR. When the PR
+# closes, its preview is deleted. While the repo is private the link only opens
+# after Cloudflare Access sign-in, and nothing is uploaded unless that is proven
+# first. See README.md for setup.
 #
-# Three jobs keep the Cloudflare token away from the repo's code:
-#   build  - runs the repo's install, build and check, with no Cloudflare token.
-#   deploy - uploads the build output with pr-preview's own pinned Wrangler.
-#            None of the repo's code runs in this job, and workerd, which
-#            Wrangler could use to run it locally, is turned off.
-#   report - posts or updates the PR comment.
+# The jobs keep the Cloudflare token away from the repo's code:
+#   build   - runs the repo's install, build and check, with no Cloudflare token.
+#   deploy  - uploads the build output with pr-preview's own pinned Wrangler.
+#             None of the repo's code runs in this job, and workerd, which
+#             Wrangler could use to run it locally, is turned off.
+#   cleanup - deletes the preview of a closed PR.
+#   report  - posts or updates the PR comment.
 name: pr-preview
 
 on:
@@ -93,9 +95,9 @@ on:
       url:
         description: The preview link.
         value: ${{ jobs.deploy.outputs.url }}
-      version-id:
-        description: The uploaded Worker version.
-        value: ${{ jobs.deploy.outputs.version-id }}
+      deployment-id:
+        description: The new deployment of the preview.
+        value: ${{ jobs.deploy.outputs.deployment-id }}
       visibility:
         description: private or public.
         value: ${{ jobs.build.outputs.visibility }}
@@ -120,6 +122,7 @@ jobs:
       contents: read # to check out the repo
     outputs:
       run: ${{ steps.plan.outputs.run }}
+      cleanup: ${{ steps.plan.outputs.cleanup }}
       status: ${{ steps.plan.outputs.status }}
       message: ${{ steps.plan.outputs.message }}
       build: ${{ steps.plan.outputs.build }}
@@ -255,7 +258,7 @@ jobs:
       message: ${{ steps.deploy.outputs.message || steps.fresh.outputs.message }}
       url: ${{ steps.deploy.outputs.url }}
       main-url: ${{ steps.deploy.outputs.main-url }}
-      version-id: ${{ steps.deploy.outputs.version-id }}
+      deployment-id: ${{ steps.deploy.outputs.deployment-id }}
     steps:
       - name: Check which pr-preview is running
         env:
@@ -319,9 +322,54 @@ jobs:
           BUNDLE_DIR: ${{ runner.temp }}/pr-preview-bundle
         run: node tool/scripts/deploy.mjs
 
+  cleanup:
+    name: Clean up
+    needs: build
+    if: needs.build.outputs.cleanup == 'true'
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 5
+    permissions:
+      contents: read # to check out pr-preview
+    outputs:
+      status: ${{ steps.cleanup.outputs.status }}
+      message: ${{ steps.cleanup.outputs.message }}
+    steps:
+      - name: Check which pr-preview is running
+        env:
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          if [[ ! "$WORKFLOW_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ || ! "$WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::GitHub didn't report which pr-preview commit is running (job.workflow_repository and job.workflow_sha), so pr-preview stops here. GitHub Enterprise Server doesn't provide them."
+            exit 1
+          fi
+
+      - name: Check out pr-preview
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: tool
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Delete the preview
+        id: cleanup
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PLAN_WORKER: ${{ needs.build.outputs.worker }}
+          PLAN_ALIAS: ${{ needs.build.outputs.alias }}
+        run: node tool/scripts/cleanup.mjs
+
   report:
     name: Report
-    needs: [build, deploy]
+    needs: [build, deploy, cleanup]
     if: ${{ !cancelled() && needs.build.outputs.run == 'true' }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 5
@@ -376,4 +424,8 @@ jobs:
           DEPLOY_MESSAGE: ${{ needs.deploy.outputs.message }}
           DEPLOY_URL: ${{ needs.deploy.outputs.url }}
           DEPLOY_MAIN_URL: ${{ needs.deploy.outputs.main-url }}
+          PLAN_CLEANUP: ${{ needs.build.outputs.cleanup }}
+          CLEANUP_RESULT: ${{ needs.cleanup.result }}
+          CLEANUP_STATUS: ${{ needs.cleanup.outputs.status }}
+          CLEANUP_MESSAGE: ${{ needs.cleanup.outputs.message }}
         run: node tool/scripts/report.mjs

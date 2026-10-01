@@ -2,9 +2,12 @@
 // pr-preview's own pinned Wrangler on the collected build output; none of the
 // repo's code runs here.
 //
-// Private previews fail closed: nothing is uploaded unless the Worker's workers.dev
-// address and its Version URLs (Cloudflare's former Preview URLs) already redirect
-// to Cloudflare Access, and the new link is checked again after the upload.
+// Each preview is a Cloudflare Worker Preview named after its PR or branch, so the
+// cleanup job can delete it when the PR closes. Private previews fail closed:
+// nothing is uploaded unless the Worker's workers.dev address and its preview
+// links already redirect to Cloudflare Access, and the new links are checked again
+// after the upload. When a check finds the Worker open, this run's preview is
+// deleted.
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
@@ -100,7 +103,8 @@ export function loadBundle(bundleDir) {
 // Runs pr-preview's pinned Wrangler with a minimal environment, from an empty
 // folder (Wrangler loads .env files from its working folder) and with GitHub
 // workflow commands paused, since its output echoes file and binding names.
-export function createWranglerRunner({ token, accountId, tempDir }) {
+// `extraEnv` is for tests, which point Wrangler at a local stand-in for Cloudflare.
+export function createWranglerRunner({ token, accountId, tempDir, extraEnv = {} }) {
   const bin = path.join(TOOL_DIR, 'node_modules', 'wrangler', 'bin', 'wrangler.js');
   const cwd = path.join(tempDir, 'pr-preview-wrangler');
   mkdirSync(cwd, { recursive: true });
@@ -126,6 +130,7 @@ export function createWranglerRunner({ token, accountId, tempDir }) {
     for (const name of ['HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY', 'https_proxy', 'http_proxy', 'no_proxy', 'NODE_EXTRA_CA_CERTS']) {
       if (process.env[name]) env[name] = process.env[name];
     }
+    Object.assign(env, extraEnv);
     const pause = randomBytes(16).toString('hex');
     console.log(`::stop-commands::${pause}`);
     let tail = '';
@@ -275,8 +280,17 @@ export async function deploy(inputs, { fetch = globalThis.fetch, sleep = default
 
   const suffix = info.previewUrlSuffix && PREVIEW_SUFFIX.test(info.previewUrlSuffix) ? info.previewUrlSuffix : `-${worker}.${subdomain}.workers.dev`;
   const workersDevUrl = info.url && WORKERS_DEV_URL.test(info.url) ? hostUrl(info.url) : `https://${worker}.${subdomain}.workers.dev/`;
-  const aliasUrl = `https://${alias}${suffix}/`;
+  const previewUrl = `https://${alias}${suffix}/`;
   const mainUrl = `https://${mainAlias}${suffix}/`;
+
+  // Deletes this run's preview, since an open Worker could be serving it to anyone.
+  const removeOpenPreview = async () => {
+    try {
+      return (await cf.deletePreview(worker, alias)) ? ` pr-preview deleted the preview ${alias} so it doesn't stay open.` : '';
+    } catch (error) {
+      return ` Deleting the preview ${alias} failed too: ${clean(errorMessage(error), 200)}`;
+    }
+  };
 
   const requireGate = async (url, label, attempts, { justCreated = false } = {}) => {
     const verdict = await probeGate(url, { teamDomain, fetch, sleep, attempts });
@@ -288,7 +302,8 @@ export async function deploy(inputs, { fetch = globalThis.fetch, sleep = default
         { status: 'needs-access' },
       );
     }
-    throw new UserError(`The ${label} of ${worker} ${verdict.reason}, so it isn't behind Cloudflare Access.`, { status: 'gate-off' });
+    const removed = await removeOpenPreview();
+    throw new UserError(`The ${label} of ${worker} ${verdict.reason}, so it isn't behind Cloudflare Access.${removed}`, { status: 'gate-off' });
   };
 
   if (isPrivate) {
@@ -296,9 +311,11 @@ export async function deploy(inputs, { fetch = globalThis.fetch, sleep = default
     // protects all its Workers; a new host also takes a few more seconds to answer.
     const attempts = created ? 6 : 3;
     await requireGate(workersDevUrl, 'workers.dev address', attempts, { justCreated: created });
+    // Version and preview links share one host pattern, and the deployed version
+    // always has a link to check, even before this PR has a preview.
     const deployed = await step(`reading the deployments of ${worker}`, () => cf.deployedVersionId(worker));
-    const versionHost = deployed && /^[0-9a-f]{8}/.test(deployed) ? `https://${deployed.slice(0, 8)}${suffix}/` : aliasUrl;
-    await requireGate(versionHost, 'Version URLs', attempts, { justCreated: created });
+    const versionHost = deployed && /^[0-9a-f]{8}/.test(deployed) ? `https://${deployed.slice(0, 8)}${suffix}/` : previewUrl;
+    await requireGate(versionHost, 'preview links', attempts, { justCreated: created });
   }
 
   const ids = {};
@@ -328,31 +345,35 @@ export async function deploy(inputs, { fetch = globalThis.fetch, sleep = default
     );
   }
 
+  // --ignore-base-config keeps the Previews settings in Cloudflare's dashboard,
+  // such as secrets, out of the preview: it gets only what this config gives it.
   const label = inputs.prNumber ? `PR #${inputs.prNumber}` : mainAlias;
   const upload = await wranglerOrThrow(
     runWrangler,
-    ['versions', 'upload', '--config', configPath, '--preview-alias', alias, '--message', `${label} at ${inputs.sha.slice(0, 7)}`],
+    ['preview', '--config', configPath, '--name', alias, '--message', `${label} at ${inputs.sha.slice(0, 7)}`, '--ignore-base-config'],
     'uploading the preview',
     { retries: 1, retryIf: (tail) => TRANSIENT.test(tail), sleep },
   );
-  const result = upload.entries.filter((entry) => entry?.type === 'version-upload').pop();
-  const versionId = result?.version_id;
-  if (typeof versionId !== 'string' || !/^[0-9a-f-]{8,}$/.test(versionId)) throw new UserError('Wrangler finished without reporting the new version.');
-  const versionUrl = typeof result.preview_url === 'string' && WORKERS_DEV_URL.test(result.preview_url) ? hostUrl(result.preview_url) : undefined;
-  if (!result.preview_alias_url) {
-    throw new UserError(`Cloudflare didn't create a preview link for version ${versionId.slice(0, 8)}. Check that Version URLs are on for ${worker}.`);
+  const result = upload.entries.filter((entry) => entry?.type === 'preview').pop();
+  const deploymentId = result?.deployment_id;
+  if (typeof deploymentId !== 'string' || !/^[A-Za-z0-9-]{1,64}$/.test(deploymentId)) {
+    throw new UserError('Wrangler finished without reporting the new preview deployment.');
   }
-  if (hostUrl(result.preview_alias_url) !== aliasUrl) {
-    log.warning(`Wrangler reported the link ${clean(result.preview_alias_url)} instead of ${aliasUrl}; using Wrangler's.`);
+  const workersDevLinks = (urls) => (Array.isArray(urls) ? urls.filter((link) => typeof link === 'string' && WORKERS_DEV_URL.test(link)).map(hostUrl) : []);
+  const previewLinks = workersDevLinks(result.preview_urls);
+  const deploymentUrl = workersDevLinks(result.deployment_urls)[0];
+  if (previewLinks.length === 0) {
+    throw new UserError(`Cloudflare didn't give the preview ${alias} a workers.dev link. Check that Version URLs are on for ${worker}.`);
   }
-  const url = WORKERS_DEV_URL.test(result.preview_alias_url) ? hostUrl(result.preview_alias_url) : aliasUrl;
+  const url = previewLinks.includes(previewUrl) ? previewUrl : previewLinks[0];
+  if (url !== previewUrl) log.warning(`Wrangler reported the link ${clean(url)} instead of ${previewUrl}; using Wrangler's.`);
 
   if (isPrivate) {
     await requireGate(url, 'new preview link', 6);
-    if (versionUrl) await requireGate(versionUrl, 'new version link', 6);
+    if (deploymentUrl) await requireGate(deploymentUrl, 'new deployment link', 6);
   }
 
-  return { status: 'deployed', url, 'main-url': mainUrl, 'version-id': versionId, 'version-url': versionUrl ?? '', worker, visibility };
+  return { status: 'deployed', url, 'main-url': mainUrl, 'deployment-id': deploymentId, 'deployment-url': deploymentUrl ?? '', worker, visibility };
 }
 
 if (isMain(import.meta.url)) {

@@ -62,6 +62,23 @@ test('picks the version with the most traffic', async () => {
   assert.equal(await client(fetch).deployedVersionId('app-preview'), 'bbbb');
 });
 
+test('deletes a preview, and reads a missing preview or Worker as nothing to delete', async () => {
+  let state = 'present';
+  const { fetch, calls } = fakeFetch([
+    ['DELETE', `${base}/workers/workers/app-preview/previews/pr-12`, () => (state === 'present' ? ok(null) : cfError(404, 10025, 'Preview not found'))],
+    ['DELETE', `${base}/workers/workers/gone/previews/pr-12`, () => cfError(404, 10007, 'Worker not found')],
+    ['DELETE', `${base}/workers/workers/empty/previews/pr-12`, () => new Response(null, { status: 204 })],
+    ['DELETE', `${base}/workers/workers/locked/previews/pr-12`, () => cfError(403, 10000, 'Authentication error')],
+  ]);
+  assert.equal(await client(fetch).deletePreview('app-preview', 'pr-12'), true);
+  assert.equal(calls[0].method, 'DELETE');
+  state = 'gone';
+  assert.equal(await client(fetch).deletePreview('app-preview', 'pr-12'), false);
+  assert.equal(await client(fetch).deletePreview('gone', 'pr-12'), false);
+  assert.equal(await client(fetch).deletePreview('empty', 'pr-12'), true);
+  await assert.rejects(client(fetch).deletePreview('locked', 'pr-12'), CloudflareApiError);
+});
+
 test('finds a D1 database across pages and creates it when missing', async () => {
   const page1 = Array.from({ length: 100 }, (_, i) => ({ name: `db-${i}`, uuid: `u${i}` }));
   const { fetch, calls } = fakeFetch([

@@ -1,6 +1,7 @@
-// The report job: posts or updates the one pr-preview comment on the PR and
-// writes the run summary. It reads job results only; no build output reaches it
-// except the check's last lines, which it shows as plain text.
+// The report job: posts or updates the one pr-preview comment on the PR, saying
+// the preview was deleted once the PR closes, and writes the run summary. It reads
+// job results only; no build output reaches it except the check's last lines,
+// which it shows as plain text.
 import { appendSummary, isMain, log, main, patterns, readEnv } from './lib/common.mjs';
 import { decide, isPreviewComment, readLastGood, renderComment } from './lib/comment.mjs';
 import { createGitHub } from './lib/github.mjs';
@@ -22,6 +23,10 @@ export function results(env) {
     deployMessage: get('DEPLOY_MESSAGE'),
     url: get('DEPLOY_URL'),
     mainUrl: get('DEPLOY_MAIN_URL'),
+    cleanup: get('PLAN_CLEANUP'),
+    cleanupResult: get('CLEANUP_RESULT'),
+    cleanupStatus: get('CLEANUP_STATUS'),
+    cleanupMessage: get('CLEANUP_MESSAGE'),
   };
 }
 
@@ -70,6 +75,8 @@ export async function report(env, { fetch, now = new Date().toISOString() } = {}
     log.info(`Updated the preview comment on PR #${prNumber}.`);
     return { action: 'updated', body };
   }
+  // A closed pull request that never had a preview comment doesn't get one.
+  if (state.kind === 'removed' || state.kind === 'remove-failed') return { action: 'none', body };
   await github.createComment(prNumber, body);
   log.info(`Posted the preview comment on PR #${prNumber}.`);
   return { action: 'created', body };

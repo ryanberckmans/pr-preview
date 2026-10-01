@@ -1,5 +1,6 @@
 // First step of the build job, before any of the repo's code runs. Works out which
-// preview this run makes, whether it is private, and whether Cloudflare is set up.
+// preview this run makes or, when a pull request closes, deletes, whether it is
+// private, and whether Cloudflare is set up.
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
@@ -29,13 +30,14 @@ export function plan(env) {
   let alias;
   let sha;
   let prNumber = '';
+  let cleanup = false;
   if (eventName === 'pull_request') {
     const pr = event.pull_request ?? {};
-    if (event.action === 'closed') return { run: 'false', reason: 'The pull request is closed.' };
     if (pr.head?.repo?.full_name !== repository) return { run: 'false', reason: 'Pull requests from forks get no preview.' };
     prNumber = String(pr.number ?? '');
     sha = pr.head?.sha;
     alias = `pr-${prNumber}`;
+    cleanup = event.action === 'closed';
   } else if (eventName === 'push' || eventName === 'workflow_dispatch') {
     if (readEnv(env, 'GITHUB_REF') !== `refs/heads/${defaultBranch}`) {
       return { run: 'false', reason: `Only the default branch (${defaultBranch}) gets a preview outside pull requests.` };
@@ -88,6 +90,7 @@ export function plan(env) {
       env.HAS_ACCOUNT_ID === 'true' ? null : 'CLOUDFLARE_ACCOUNT_ID',
     ].filter(Boolean);
     const configured = missing.length === 0;
+    if (cleanup && !configured) return { run: 'false', reason: 'The pull request is closed, and without the Cloudflare secrets it has no preview to delete.' };
     const workspace = readEnv(env, 'GITHUB_WORKSPACE', { required: true });
     return {
       ...base,
@@ -99,10 +102,12 @@ export function plan(env) {
       'app-dir': path.resolve(workspace, 'app', workingDirectory),
       configured: String(configured),
       missing: missing.join(' '),
-      build: String(configured),
+      build: String(configured && !cleanup),
+      cleanup: String(cleanup),
     };
   } catch (error) {
     if (!(error instanceof UserError)) throw error;
+    if (cleanup) return { run: 'false', reason: `The pull request is closed, but its preview can't be deleted: ${error.message}` };
     return { ...base, status: 'invalid', message: error.message, build: 'false' };
   }
 }
@@ -116,6 +121,10 @@ if (isMain(import.meta.url)) {
       return;
     }
     if (outputs.status === 'invalid') throw new UserError(outputs.message);
+    if (outputs.cleanup === 'true') {
+      log.info(`The pull request is closed, so its preview ${outputs.alias} on Worker ${outputs.worker} will be deleted.`);
+      return;
+    }
     log.info(`Preview ${outputs.alias} of ${outputs.sha.slice(0, 7)} on Worker ${outputs.worker} (${outputs.visibility}).`);
     if (outputs.configured !== 'true') {
       const missing = outputs.missing.split(' ');

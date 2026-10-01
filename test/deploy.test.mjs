@@ -10,7 +10,7 @@ import { cfError, fakeFetch, fakeWrangler, noSleep, ok, redirect, tempDir } from
 const accountId = '0123456789abcdef0123456789abcdef';
 const api = `/client/v4/accounts/${accountId}`;
 const sha = 'e'.repeat(40);
-const versionId = 'abcdef12-3456-4789-8abc-def012345678';
+const deploymentId = 'abcdef12-3456-4789-8abc-def012345678';
 const dbId = '99999999-8888-4777-8666-555555555555';
 const login = (host) => `https://acme.cloudflareaccess.com/cdn-cgi/access/login/${host}?kid=1&redirect_url=%2F`;
 
@@ -60,9 +60,19 @@ function inputs(bundleDir, overrides = {}) {
   };
 }
 
-// A Cloudflare account where everything is set up; `overrides` replaces routes.
-function cloudflare({ worker = 'app-preview', exists = true, previews = true, gate = 'on', afterUpload = 'on', databases = [{ name: 'app-preview-db', uuid: dbId }] } = {}) {
+// A Cloudflare account where everything is set up, unless told otherwise.
+// `previewExists` says whether pr-12 has a preview from an earlier push.
+function cloudflare({
+  worker = 'app-preview',
+  exists = true,
+  previews = true,
+  gate = 'on',
+  afterUpload = 'on',
+  previewExists = false,
+  databases = [{ name: 'app-preview-db', uuid: dbId }],
+} = {}) {
   let uploaded = false;
+  let preview = previewExists;
   let created = !exists;
   const host = (h) => `https://${h}-${worker}.acme.workers.dev/`;
   const gated = (h, state) => (state === 'on' ? redirect(login(h)) : new Response('open', { status: 200 }));
@@ -77,25 +87,45 @@ function cloudflare({ worker = 'app-preview', exists = true, previews = true, ga
           : cfError(404, 10007, 'not found'),
     ],
     ['POST', `${api}/workers/scripts/${worker}/subdomain`, () => ok({ enabled: true, previews_enabled: true })],
+    [
+      'DELETE',
+      `${api}/workers/workers/${worker}/previews/pr-12`,
+      () => {
+        const had = preview;
+        preview = false;
+        return had ? ok(null) : cfError(404, 10025, 'Preview not found');
+      },
+    ],
     ['GET', `${api}/workers/scripts/${worker}/deployments`, () => ok({ deployments: [{ versions: [{ version_id: '11112222-0000-4000-8000-000000000000', percentage: 100 }] }] })],
     ['GET', `${api}/d1/database`, () => ok(databases)],
     ['POST', `${api}/d1/database`, ({ body }) => ok({ name: body.name, uuid: dbId })],
     ['GET', `https://${worker}.acme.workers.dev/`, () => gated(`${worker}.acme.workers.dev`, gate)],
     ['GET', host('11112222'), () => gated('11112222', gate)],
     ['GET', host('pr-12'), () => gated('pr-12', uploaded ? afterUpload : gate)],
-    ['GET', host('abcdef12'), () => gated('abcdef12', afterUpload)],
+    ['GET', host(deploymentId), () => gated(deploymentId, afterUpload)],
   ];
   const fake = fakeFetch(routes);
   const wrangler = fakeWrangler((args) => {
     if (args[0] === 'deploy') created = 'done';
-    if (args[0] === 'versions') {
+    if (args[0] === 'preview') {
       uploaded = true;
+      preview = true;
       return {
         code: 0,
         tail: '',
         entries: [
           { type: 'wrangler-session' },
-          { type: 'version-upload', version_id: versionId, preview_url: `https://abcdef12-${worker}.acme.workers.dev`, preview_alias_url: `https://pr-12-${worker}.acme.workers.dev` },
+          {
+            type: 'preview',
+            version: 1,
+            worker_name: worker,
+            preview_id: 'f00d',
+            preview_name: 'pr-12',
+            preview_slug: 'pr-12',
+            preview_urls: [`https://pr-12-${worker}.acme.workers.dev`],
+            deployment_id: deploymentId,
+            deployment_urls: [`https://${deploymentId}-${worker}.acme.workers.dev`],
+          },
         ],
       };
     }
@@ -105,6 +135,7 @@ function cloudflare({ worker = 'app-preview', exists = true, previews = true, ga
 }
 
 const probes = (calls) => calls.filter((call) => call.url.includes('.workers.dev'));
+const deletes = (calls) => calls.filter((call) => call.method === 'DELETE');
 
 test('a private preview is uploaded only after the gate is proven, then checked again', async (t) => {
   const bundleDir = makeBundle(t);
@@ -114,27 +145,34 @@ test('a private preview is uploaded only after the gate is proven, then checked 
     status: 'deployed',
     url: 'https://pr-12-app-preview.acme.workers.dev/',
     'main-url': 'https://main-app-preview.acme.workers.dev/',
-    'version-id': versionId,
-    'version-url': 'https://abcdef12-app-preview.acme.workers.dev/',
+    'deployment-id': deploymentId,
+    'deployment-url': `https://${deploymentId}-app-preview.acme.workers.dev/`,
     worker: 'app-preview',
     visibility: 'private',
   });
 
   const [migrate, upload] = cf.wrangler.runs;
   assert.deepEqual(migrate.args.slice(0, 5), ['d1', 'migrations', 'apply', 'DB', '--remote']);
-  assert.deepEqual(upload.args.slice(0, 1), ['versions']);
-  assert.ok(upload.args.includes('--preview-alias') && upload.args.includes('pr-12'));
+  assert.equal(upload.args[0], 'preview');
+  assert.equal(upload.args[upload.args.indexOf('--name') + 1], 'pr-12');
   assert.equal(upload.args[upload.args.indexOf('--message') + 1], 'PR #12 at eeeeeee');
+  assert.ok(upload.args.includes('--ignore-base-config'));
   assert.equal(upload.config.name, 'app-preview');
-  assert.deepEqual(upload.config.vars, { MODE: 'preview' });
+  // Previews take their variables and bindings from the previews block only.
+  assert.deepEqual(upload.config.vars, {});
+  assert.deepEqual(upload.config.previews, {
+    vars: { MODE: 'preview' },
+    d1_databases: [{ binding: 'DB', database_name: 'app-preview-db', database_id: dbId }],
+  });
   assert.deepEqual(upload.config.d1_databases, [{ binding: 'DB', database_name: 'app-preview-db', database_id: dbId, migrations_dir: 'files/drizzle' }]);
   assert.equal('legacy_env' in upload.config, false);
 
   // Two probes before the upload (workers.dev and the deployed version), two after.
   const hosts = probes(cf.calls).map((call) => new URL(call.url).hostname.split('.')[0]);
-  assert.deepEqual(hosts, ['app-preview', '11112222-app-preview', 'pr-12-app-preview', 'abcdef12-app-preview']);
+  assert.deepEqual(hosts, ['app-preview', '11112222-app-preview', 'pr-12-app-preview', `${deploymentId}-app-preview`]);
   const uploadIndex = cf.calls.findIndex((call) => call.url.includes('pr-12-'));
   assert.ok(uploadIndex > cf.calls.findIndex((call) => call.url.includes('11112222-')));
+  assert.equal(deletes(cf.calls).length, 0);
 });
 
 test('a missing private Worker is created as a placeholder, and nothing is uploaded until Access is on', async (t) => {
@@ -150,6 +188,7 @@ test('a missing private Worker is created as a placeholder, and nothing is uploa
   assert.ok(args[args.indexOf('--config') + 1].endsWith(path.join('placeholder', 'wrangler.json')));
   assert.equal(probes(cf.calls).length, 1);
   assert.equal(cf.calls.filter((call) => call.path.endsWith('/d1/database')).length, 0);
+  assert.equal(deletes(cf.calls).length, 0);
 });
 
 test('a new private Worker in an account that protects all Workers gets its preview on the first run', async (t) => {
@@ -157,9 +196,9 @@ test('a new private Worker in an account that protects all Workers gets its prev
   const result = await deploy(inputs(makeBundle(t)), { fetch: cf.fetch, sleep: noSleep, runWrangler: cf.wrangler.run });
   assert.equal(result.status, 'deployed');
   assert.equal(result.url, 'https://pr-12-app-preview.acme.workers.dev/');
-  assert.deepEqual(cf.wrangler.runs.map((run) => run.args[0]), ['deploy', 'd1', 'versions']);
+  assert.deepEqual(cf.wrangler.runs.map((run) => run.args[0]), ['deploy', 'd1', 'preview']);
   const hosts = probes(cf.calls).map((call) => new URL(call.url).hostname.split('.')[0]);
-  assert.deepEqual(hosts, ['app-preview', '11112222-app-preview', 'pr-12-app-preview', 'abcdef12-app-preview']);
+  assert.deepEqual(hosts, ['app-preview', '11112222-app-preview', 'pr-12-app-preview', `${deploymentId}-app-preview`]);
 });
 
 test('a new private Worker whose new link opens without sign-in still fails as blocked', async (t) => {
@@ -174,16 +213,51 @@ test('an open private Worker stops everything before the upload', async (t) => {
   const error = await deploy(inputs(makeBundle(t)), { fetch: cf.fetch, sleep: noSleep, runWrangler: cf.wrangler.run }).catch((e) => e);
   assert.ok(error instanceof UserError);
   assert.equal(error.status, 'gate-off');
-  assert.match(error.message, /workers\.dev address of app-preview answered 200 without sign-in/);
+  assert.match(error.message, /workers\.dev address of app-preview answered 200 without sign-in, so it isn't behind Cloudflare Access\.$/);
   assert.equal(cf.wrangler.runs.length, 0);
   assert.equal(cf.calls.filter((call) => call.path.endsWith('/d1/database')).length, 0);
+  // This PR had no preview yet, so there was nothing to delete.
+  assert.equal(deletes(cf.calls).length, 1);
 });
 
-test('a new link that answers without sign-in fails the run', async (t) => {
+test('an open private Worker loses this PR\'s preview from an earlier push', async (t) => {
+  const cf = cloudflare({ gate: 'off', previewExists: true });
+  const error = await deploy(inputs(makeBundle(t)), { fetch: cf.fetch, sleep: noSleep, runWrangler: cf.wrangler.run }).catch((e) => e);
+  assert.equal(error.status, 'gate-off');
+  assert.match(error.message, /pr-preview deleted the preview pr-12 so it doesn't stay open\.$/);
+  assert.equal(deletes(cf.calls)[0].path, `${api}/workers/workers/app-preview/previews/pr-12`);
+  assert.equal(cf.wrangler.runs.length, 0);
+});
+
+test('a new link that answers without sign-in fails the run, and the new preview is deleted', async (t) => {
   const cf = cloudflare({ afterUpload: 'off' });
   const error = await deploy(inputs(makeBundle(t)), { fetch: cf.fetch, sleep: noSleep, runWrangler: cf.wrangler.run }).catch((e) => e);
   assert.equal(error.status, 'gate-off');
-  assert.match(error.message, /new preview link/);
+  assert.match(error.message, /new preview link of app-preview answered 200 without sign-in.*pr-preview deleted the preview pr-12/);
+  assert.equal(deletes(cf.calls).length, 1);
+});
+
+test('a failed delete is reported along with the open link', async (t) => {
+  const cf = cloudflare({ afterUpload: 'off' });
+  const failing = async (input, init) => (init?.method === 'DELETE' ? cfError(403, 10000, 'Authentication error') : cf.fetch(input, init));
+  const error = await deploy(inputs(makeBundle(t)), { fetch: failing, sleep: noSleep, runWrangler: cf.wrangler.run }).catch((e) => e);
+  assert.equal(error.status, 'gate-off');
+  assert.match(error.message, /Deleting the preview pr-12 failed too: Authentication error/);
+});
+
+test('a preview without a workers.dev link is an error', async (t) => {
+  const cf = cloudflare();
+  const noLink = async (args) => {
+    const result = await cf.wrangler.run(args);
+    if (args[0] !== 'preview') return result;
+    const entry = result.entries.find((e) => e.type === 'preview');
+    return { ...result, entries: [{ ...entry, preview_urls: [], deployment_urls: [] }] };
+  };
+  await assert.rejects(deploy(inputs(makeBundle(t)), { fetch: cf.fetch, sleep: noSleep, runWrangler: noLink }), /didn't give the preview pr-12 a workers\.dev link/);
+  await assert.rejects(
+    deploy(inputs(makeBundle(t)), { fetch: cf.fetch, sleep: noSleep, runWrangler: async (args) => ({ ...(await cf.wrangler.run(args)), entries: [] }) }),
+    /without reporting the new preview deployment/,
+  );
 });
 
 test('Access for another team does not count', async (t) => {
@@ -199,7 +273,7 @@ test('a public preview goes to the -public Worker, created on first use, with no
   assert.equal(result.status, 'deployed');
   assert.equal(result.url, 'https://pr-12-app-preview-public.acme.workers.dev/');
   assert.equal(probes(cf.calls).length, 0);
-  assert.deepEqual(cf.wrangler.runs.map((run) => run.args[0]), ['deploy', 'd1', 'versions']);
+  assert.deepEqual(cf.wrangler.runs.map((run) => run.args[0]), ['deploy', 'd1', 'preview']);
   assert.deepEqual(cf.calls.find((call) => call.method === 'POST' && call.path.endsWith('/d1/database')).body, { name: 'app-preview-db' });
 });
 
@@ -236,7 +310,7 @@ test('a transient upload failure is retried once', async (t) => {
   const cf = cloudflare();
   let attempts = 0;
   const flaky = async (args) => {
-    if (args[0] === 'versions' && attempts++ === 0) return { code: 1, tail: '✘ [ERROR] A request to the Cloudflare API failed: 503 Service Unavailable', entries: [] };
+    if (args[0] === 'preview' && attempts++ === 0) return { code: 1, tail: '✘ [ERROR] A request to the Cloudflare API failed: 503 Service Unavailable', entries: [] };
     return cf.wrangler.run(args);
   };
   const result = await deploy(inputs(makeBundle(t)), { fetch: cf.fetch, sleep: noSleep, runWrangler: flaky });
@@ -247,7 +321,7 @@ test('a transient upload failure is retried once', async (t) => {
 test('a lasting upload failure reports Wrangler\'s error', async (t) => {
   const cf = cloudflare();
   const failing = async (args) =>
-    args[0] === 'versions' ? { code: 1, tail: 'Uploading...\n✘ [ERROR] Your Worker exceeded the size limit of 3 MiB.\n', entries: [] } : cf.wrangler.run(args);
+    args[0] === 'preview' ? { code: 1, tail: 'Uploading...\n✘ [ERROR] Your Worker exceeded the size limit of 3 MiB.\n', entries: [] } : cf.wrangler.run(args);
   await assert.rejects(deploy(inputs(makeBundle(t)), { fetch: cf.fetch, sleep: noSleep, runWrangler: failing }), /uploading the preview: Your Worker exceeded the size limit of 3 MiB\./);
 });
 

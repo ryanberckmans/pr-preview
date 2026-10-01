@@ -24,7 +24,13 @@ test('a config written by the Cloudflare Vite plugin becomes a preview config', 
   assert.equal(config.base_dir, 'files/dist/server');
   assert.equal(config.no_bundle, true);
   assert.deepEqual(config.assets, { directory: 'files/dist/client' });
-  assert.deepEqual(config.vars, { MODE: 'preview' });
+  // Cloudflare's Worker Previews read variables and bindings from the previews block.
+  assert.deepEqual(config.vars, {});
+  assert.deepEqual(config.previews, {
+    vars: { MODE: 'preview' },
+    d1_databases: [{ binding: 'DB', database_name: 'app-preview', database_id: '11111111-2222-4333-8444-555555555555' }],
+  });
+  // The top-level entry is there for applying migrations.
   assert.deepEqual(config.d1_databases, [
     { binding: 'DB', database_name: 'app-preview', database_id: '11111111-2222-4333-8444-555555555555', migrations_dir: 'files/drizzle' },
   ]);
@@ -82,6 +88,25 @@ test('source maps are never uploaded, since Wrangler would follow their paths an
 test('the build variables never reach the preview', () => {
   const { config } = build({ ...vinext, vars: { DATA_REFRESH_ENABLED: 'true', X402_ENABLED: 'true' } }, { vars: {} });
   assert.deepEqual(config.vars, {});
+  assert.deepEqual(config.previews.vars, {});
+});
+
+test('a previews block from the build is replaced, and settings previews read from it move there', () => {
+  const { config, dropped } = build({
+    ...vinext,
+    previews: { vars: { API_KEY: 'from-the-build' }, kv_namespaces: [{ binding: 'CACHE', id: 'prod-kv' }] },
+    define: { __BUILD__: '"1"' },
+    version_metadata: { binding: 'CF_VERSION_METADATA' },
+  });
+  assert.deepEqual(dropped, []);
+  assert.deepEqual(config.previews, {
+    define: { __BUILD__: '"1"' },
+    version_metadata: { binding: 'CF_VERSION_METADATA' },
+    vars: { MODE: 'preview' },
+    d1_databases: [{ binding: 'DB', database_name: 'app-preview', database_id: '11111111-2222-4333-8444-555555555555' }],
+  });
+  assert.equal('define' in config, false);
+  assert.equal('version_metadata' in config, false);
 });
 
 test('paths must stay inside the build output', () => {

@@ -1,6 +1,10 @@
 // Builds the Wrangler config for a preview upload from the config the build wrote.
 // The preview gets the build's code and assets, the D1 databases in the `d1` input,
 // the variables in `preview-vars`, and nothing else.
+//
+// Cloudflare's Worker Previews take their variables and bindings only from the
+// config's `previews` block, so that is where they go. The top-level D1 entries
+// are there for `wrangler d1 migrations apply`; nothing is ever deployed from them.
 import path from 'node:path';
 import { UserError, clean, isPlainObject, resolveUnder, toPosix } from './common.mjs';
 
@@ -16,18 +20,20 @@ const KEEP = new Set([
   'find_additional_modules',
   'preserve_file_names',
   'python_modules',
-  'version_metadata',
   'minify',
   'keep_names',
-  'define',
   'alias',
   'jsx_factory',
   'jsx_fragment',
 ]);
 
+// Previews read these from the `previews` block, so they are moved there.
+const MOVED_TO_PREVIEWS = new Set(['define', 'version_metadata']);
+
 // Set by pr-preview, whatever the build wrote.
 const REPLACED = new Set([
   'name',
+  'previews',
   'main',
   'base_dir',
   'no_bundle',
@@ -159,11 +165,14 @@ export function buildPreviewConfig(raw, { name, root, configDir, outDir, d1, var
   const unsupported = [];
   const dropped = [];
   const config = {};
+  const previews = {};
   for (const [key, value] of Object.entries(raw)) {
     if (key === 'upload_source_maps' && value) dropped.push(key);
     if (REPLACED.has(key)) continue;
     if (KEEP.has(key)) config[key] = structuredClone(value);
-    else if (UNSUPPORTED.has(key)) {
+    else if (MOVED_TO_PREVIEWS.has(key)) {
+      if (!isEmptyValue(value)) previews[key] = structuredClone(value);
+    } else if (UNSUPPORTED.has(key)) {
       if (!isEmptyValue(value)) unsupported.push(key);
     } else if (key === 'build') {
       if (typeof value?.command === 'string' && value.command.trim()) dropped.push('build.command');
@@ -200,7 +209,7 @@ export function buildPreviewConfig(raw, { name, root, configDir, outDir, d1, var
     config.assets = structuredClone(raw.assets);
     if (paths.assets) config.assets.directory = rel(paths.assets);
   }
-  config.vars = { ...vars };
+  config.vars = {};
   config.d1_databases = Object.entries(d1).map(([binding, spec]) => {
     const original = configured.find((entry) => entry.binding === binding);
     return {
@@ -211,6 +220,11 @@ export function buildPreviewConfig(raw, { name, root, configDir, outDir, d1, var
       ...(typeof original?.migrations_table === 'string' ? { migrations_table: original.migrations_table } : {}),
     };
   });
+  config.previews = {
+    ...previews,
+    vars: { ...vars },
+    d1_databases: config.d1_databases.map(({ binding, database_name, database_id }) => ({ binding, database_name, database_id })),
+  };
   config.workers_dev = true;
   config.preview_urls = true;
   config.keep_vars = false;

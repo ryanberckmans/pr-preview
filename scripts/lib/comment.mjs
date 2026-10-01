@@ -41,6 +41,11 @@ export function readLastGood(body) {
 // Turns job results into one state. Returns null when the comment should stay as
 // it is: the run was cancelled or superseded by a newer commit.
 export function decide(r) {
+  if (r.cleanup === 'true') {
+    if (r.cleanupResult === 'cancelled') return null;
+    if (r.cleanupStatus === 'removed' || r.cleanupStatus === 'absent') return { kind: 'removed' };
+    return { kind: 'remove-failed', message: r.cleanupMessage };
+  }
   if (r.planStatus === 'invalid') return { kind: 'invalid', message: r.planMessage };
   if (r.configured !== 'true') return { kind: 'not-configured', missing: r.missing };
   if (r.buildResult === 'cancelled' || r.deployResult === 'cancelled') return null;
@@ -147,6 +152,14 @@ export function renderComment(state, { workerName, sha, visibility, check, lastG
     }
     case 'invalid':
       lines.push(`**Preview:** the preview settings in this repo's workflow need fixing: ${inline(state.message)} ${run}`);
+      if (prior) lines.push('', stillServes(prior));
+      break;
+    case 'removed':
+      lines.push('**Preview:** deleted when this pull request closed.');
+      saved = undefined;
+      break;
+    case 'remove-failed':
+      lines.push(`**Preview:** this pull request is closed, but its preview couldn't be deleted: ${inline(state.message || 'see the run log.')} ${run}`);
       if (prior) lines.push('', stillServes(prior));
       break;
     default:

@@ -6,16 +6,15 @@ pr-preview is a reusable GitHub Actions workflow for apps that run on Cloudflare
 
 ## How it works
 
-Each push to a PR uploads a new version of a Worker that holds the repo's previews, with the preview alias `pr-<number>`. The link is `https://pr-<number>-<worker-name>.<subdomain>.workers.dev/`, and the comment is updated in place on every push. Pushes to the default branch update a preview named after that branch, such as `https://main-<worker-name>.<subdomain>.workers.dev/`, which the comment links for comparison. Nothing is ever deployed: the Worker's own address keeps answering 404.
-
-Cloudflare calls these links aliased Version URLs. Its docs steer branch testing toward its newer Worker Previews, since a Version URL doesn't isolate a branch from production resources. Here the Worker and its D1 databases exist only for previews, so there are no production resources to share.
+Each PR gets a Cloudflare [Worker Preview](https://developers.cloudflare.com/workers/previews/) named `pr-<number>`, in a Worker that holds the repo's previews. Its link is `https://pr-<number>-<worker-name>.<subdomain>.workers.dev/`. Every push deploys to the same preview, so the link always shows the latest commit, and the comment is updated in place. When the PR is merged or closed, pr-preview deletes its preview. Pushes to the default branch update a preview named after that branch, such as `https://main-<worker-name>.<subdomain>.workers.dev/`, which the comment links for comparison. Nothing is deployed to production: the Worker's own address keeps answering 404.
 
 If an install, build or upload fails, the comment says so and keeps pointing at the last preview that worked. Each Worker has its own comment, so one repo can call pr-preview for several apps. An optional check command (tests, a performance budget) runs after the build; its result goes in the comment and never blocks the preview.
 
-The workflow has three jobs, so your repo's code never runs next to the Cloudflare token:
+The workflow's jobs keep your repo's code away from the Cloudflare token:
 
 - **build** runs your install, build and check commands, with no Cloudflare token, then collects the Wrangler config, the built Worker, its static assets and its D1 migrations.
-- **deploy** uploads that output from a fresh runner with pr-preview's own pinned Wrangler. It is the only job with the token, and none of your repo's code runs in it.
+- **deploy** uploads that output from a fresh runner with pr-preview's own pinned Wrangler. None of your repo's code runs in it.
+- **cleanup** deletes a closed PR's preview. It needs no build output.
 - **report** posts or updates the PR comment.
 
 ## Privacy
@@ -25,7 +24,7 @@ Each run reads the repo's visibility from GitHub:
 - A **private** or internal repo previews to the Worker `<worker-name>`, whose links require Cloudflare Access sign-in.
 - A **public** repo previews to a separate Worker, `<worker-name>-public`, whose links are open. Set `force-private: true` to keep a public repo's previews private. If account-wide Access is on (see [Setup](#setup)), make that Worker public from its **Access** tab.
 
-Private previews fail closed. Before uploading, pr-preview checks that the Worker's workers.dev address and its Version URLs both redirect to Cloudflare Access sign-in, at your team domain when `access-team-domain` is set. After uploading, it checks the new link the same way. If any check fails, no link is posted and the comment says what to fix. Once a private Worker exists, pr-preview never turns its workers.dev or Version URLs back on, so turning them off closes every old link.
+Private previews fail closed. Before uploading, pr-preview checks that the Worker's workers.dev address and its preview links both redirect to Cloudflare Access sign-in, at your team domain when `access-team-domain` is set. After uploading, it checks the new links the same way. If any check fails, no link is posted, the PR's preview is deleted, and the comment says what to fix. Once a private Worker exists, pr-preview never turns its workers.dev address or its Version URLs setting (which also serves preview links) back on, so turning them off closes every old link.
 
 Because private and public previews live in different Workers, making a repo public never opens its earlier private previews, and a private repo's comment never links a public preview.
 
@@ -53,6 +52,7 @@ name: Preview
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, closed]
   push:
     branches: [main]
 
@@ -78,7 +78,7 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 ```
 
-pr-preview checks out its own scripts at the commit that is running, so the SHA pins everything that handles the token.
+The `closed` type lets pr-preview delete a PR's preview when the PR closes; without it, previews stay up until Cloudflare's limit pushes them out. pr-preview checks out its own scripts at the commit that is running, so the SHA pins everything that handles the token.
 
 ### 3. Sign-in for a new private Worker
 
@@ -110,18 +110,18 @@ If Access is ever turned off, the next run posts no link and says why.
 | `runs-on` | `ubuntu-24.04` | Runner for the jobs. |
 | `timeout-minutes` | `20` | Time limit for the build job. |
 
-Outputs: `url` (the preview link), `version-id` and `visibility`.
+Outputs: `url` (the preview link), `deployment-id` and `visibility`.
 
 ## What a preview gets
 
 pr-preview writes the upload's Wrangler config itself, starting from the one your build wrote:
 
 - **Kept:** code settings such as the compatibility date and flags, module rules, limits, placement and observability, plus `main` and static `assets`.
-- **Replaced:** `name`, `vars` (only `preview-vars`), `d1_databases` (only the `d1` input) and the workers.dev and Version URL settings. Your build's own `vars` never reach a preview, since they may hold production values.
+- **Replaced:** `name`, `vars` (only `preview-vars`), `d1_databases` (only the `d1` input), `previews` and the workers.dev and Version URL settings. Worker Previews take their variables and bindings from the config's `previews` block, which pr-preview writes. Your build's own `vars` never reach a preview, since they may hold production values.
 - **Dropped, and listed in the run log:** routes, custom domains, cron triggers and other settings pr-preview doesn't carry over. Source maps are never uploaded, because Wrangler would read whatever file a build's source map points to.
 - **Refused:** bindings to other resources, such as KV, R2, Durable Objects, Queues, service bindings and AI, which a preview could otherwise share with production. The run fails and the comment says which.
 
-Previews never get your production secrets: they run in their own Worker, which has none unless you add them in Cloudflare.
+Previews get no secrets. They run in their own Worker, and pr-preview creates them without the Previews settings in Cloudflare's dashboard, so secrets added there don't reach them either.
 
 ## Security
 
@@ -135,7 +135,9 @@ Previews never get your production secrets: they run in their own Worker, which 
 - The build must bundle the Worker (`no_bundle: true` with `main`), or the Worker must be assets only. The Cloudflare Vite plugin writes this kind of config. `wrangler.toml` isn't read.
 - github.com only: pr-preview relies on the `job.workflow_repository` and `job.workflow_sha` contexts, which GitHub Enterprise Server doesn't have.
 - Each D1 binding has one preview database, shared by every PR and the default branch, so a migration in one PR applies to all of them.
-- Previews stay up after their PR closes.
+- Worker Previews are an open beta. Cloudflare has open reports of a deleted preview's link still answering for hours ([workers-sdk#15945](https://github.com/cloudflare/workers-sdk/issues/15945)); a private preview's link still requires sign-in meanwhile.
+- A Worker keeps at most 100 previews on Cloudflare's Free plan (500 on paid plans). Beyond that, Cloudflare deletes the least recently updated one.
+- Links made by pr-preview before it used Worker Previews are aliased Version URLs, which Cloudflare can't delete one at a time. Deleting the preview Worker (**Workers & Pages → `<worker-name>` → Settings → Delete**) removes them all, and the next run creates the Worker again. Without account-wide Access, protect the new Worker as in [step 3](#3-sign-in-for-a-new-private-worker).
 - In private repos, the runs use the repo owner's GitHub Actions minutes.
 
 ## Development
@@ -145,4 +147,4 @@ npm ci --ignore-scripts
 npm test
 ```
 
-The tests include a dry-run upload with the pinned Wrangler. The self-test workflow runs pr-preview on the small Worker in `test/fixture`.
+The tests run the pinned Wrangler's `preview` command against a local stand-in for Cloudflare's API. The self-test workflow runs pr-preview on the small Worker in `test/fixture`.

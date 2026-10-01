@@ -49,6 +49,7 @@ test('a PR in a private repo gets a private pr-<number> preview', (t) => {
   assert.equal(out['pr-number'], '12');
   assert.equal(out.configured, 'true');
   assert.equal(out.build, 'true');
+  assert.equal(out.cleanup, 'false');
   assert.equal(out['app-dir'], path.resolve('/work/app'));
 });
 
@@ -67,9 +68,31 @@ test('internal or unknown visibility stays private', (t) => {
   assert.equal(setup(t, { event: prEvent({ repository: { private: undefined, visibility: undefined } }) }).visibility, 'private');
 });
 
-test('fork PRs and closed PRs get no preview', (t) => {
+test('fork PRs get no preview', (t) => {
   assert.equal(setup(t, { event: prEvent({ pull_request: { head: { sha, repo: { full_name: 'someone/app' } } } }) }).run, 'false');
-  assert.equal(setup(t, { event: { ...prEvent(), action: 'closed' } }).run, 'false');
+  const closedFork = { ...prEvent({ pull_request: { head: { sha, repo: null } } }), action: 'closed' };
+  assert.equal(setup(t, { event: closedFork }).run, 'false');
+});
+
+test('a closed PR has its preview deleted, and nothing is built', (t) => {
+  const out = setup(t, { event: { ...prEvent(), action: 'closed' } });
+  assert.equal(out.run, 'true');
+  assert.equal(out.cleanup, 'true');
+  assert.equal(out.build, 'false');
+  assert.equal(out.alias, 'pr-12');
+  assert.equal(out.worker, 'app-preview');
+  const publicRepo = setup(t, { event: { ...prEvent({ repository: { private: false, visibility: 'public' } }), action: 'closed' } });
+  assert.equal(publicRepo.worker, 'app-preview-public');
+});
+
+test('a closed PR without secrets or with broken settings is left alone', (t) => {
+  const closed = { ...prEvent(), action: 'closed' };
+  const unconfigured = setup(t, { event: closed, env: { HAS_ACCOUNT_ID: 'false' } });
+  assert.equal(unconfigured.run, 'false');
+  assert.match(unconfigured.reason, /no preview to delete/);
+  const invalid = setup(t, { event: closed, env: { IN_WORKER_NAME: 'Bad Name' } });
+  assert.equal(invalid.run, 'false');
+  assert.match(invalid.reason, /can't be deleted: worker-name must be/);
 });
 
 test('pushes preview the default branch only', (t) => {

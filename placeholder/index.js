@@ -1,6 +1,6 @@
 // What a preview Worker serves at its bare workers.dev address. pr-preview deploys
-// this once, when it creates the Worker; previews are separate versions, reached
-// through their own links.
+// this once, when it creates the Worker; each preview is a Worker Preview with its
+// own link.
 export default {
   fetch() {
     return new Response('No preview here. Each pull request has its own link.\n', {

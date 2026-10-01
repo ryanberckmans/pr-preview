@@ -36,6 +36,25 @@ test('decide maps job results to one state', () => {
   assert.equal(decide({ ...success, url: 'https://evil.example/' }).kind, 'deploy-failed');
 });
 
+test('decide maps a closed PR\'s cleanup to removed or failed', () => {
+  const closed = { planStatus: 'ok', configured: 'true', cleanup: 'true', buildResult: 'success', deployResult: 'skipped' };
+  assert.deepEqual(decide({ ...closed, cleanupResult: 'success', cleanupStatus: 'removed' }), { kind: 'removed' });
+  assert.deepEqual(decide({ ...closed, cleanupResult: 'success', cleanupStatus: 'absent' }), { kind: 'removed' });
+  assert.deepEqual(decide({ ...closed, cleanupResult: 'failure', cleanupStatus: 'error', cleanupMessage: 'm' }), { kind: 'remove-failed', message: 'm' });
+  assert.equal(decide({ ...closed, cleanupResult: 'skipped' }).kind, 'remove-failed');
+  assert.equal(decide({ ...closed, cleanupResult: 'cancelled' }), null);
+});
+
+test('a deleted preview leaves no link behind', () => {
+  const { body, lastGood: saved } = renderComment({ kind: 'removed' }, { ...context, lastGood });
+  assert.equal(body, `${MARKER}\n**Preview:** deleted when this pull request closed.`);
+  assert.equal(saved, undefined);
+  const failed = renderComment({ kind: 'remove-failed', message: 'Cloudflare API error while deleting the preview pr-12: boom.' }, { ...context, lastGood });
+  assert.match(failed.body, /this pull request is closed, but its preview couldn't be deleted: Cloudflare API error while deleting the preview pr-12: boom\. \(\[run\]/);
+  assert.match(failed.body, /The link still serves `aaaaaaa`/);
+  assert.deepEqual(failed.lastGood, lastGood);
+});
+
 test('a private preview comment links the preview, main and the commit', () => {
   const { body, lastGood: saved } = renderComment(decide(success), { ...context, check: { command: 'npm test', status: 'passed' } });
   assert.ok(body.startsWith('<!-- pr-preview:app-preview -->\n'));
