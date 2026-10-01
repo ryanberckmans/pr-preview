@@ -44,7 +44,7 @@ Because private and public previews live in different Workers, making a repo pub
 
 ### 2. The repo
 
-1. Add the repository secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` (**Settings → Secrets and variables → Actions**).
+1. Add the repository secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` (**Settings → Secrets and variables → Actions**). One token can serve every repo that previews to the account, but then anyone who can push to one of those repos can change the others' previews.
 2. For a private repo, add the repository variable `PREVIEW_ACCESS_TEAM_DOMAIN` with your team domain.
 3. Add `.github/workflows/preview.yml`, pinned to a full commit SHA from this repo's `main` branch:
 
