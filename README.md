@@ -52,7 +52,9 @@ name: Preview
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, closed]
+    types: [opened, synchronize, reopened]
+  pull_request_target:
+    types: [closed]
   push:
     branches: [main]
 
@@ -78,7 +80,7 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 ```
 
-The `closed` type lets pr-preview delete a PR's preview when the PR closes; without it, previews stay up until Cloudflare's limit pushes them out. pr-preview checks out its own scripts at the commit that is running, so the SHA pins everything that handles the token.
+The `pull_request_target` trigger lets pr-preview delete a PR's preview when the PR closes, merged or not; without it, previews stay up until Cloudflare's limit pushes them out. It is `pull_request_target` because GitHub runs no `pull_request` workflow for a PR with merge conflicts, as abandoned PRs often have. pr-preview checks out its own scripts at the commit that is running, so the SHA pins everything that handles the token.
 
 ### 3. Sign-in for a new private Worker
 
@@ -128,6 +130,7 @@ Previews get no secrets. They run in their own Worker, and pr-preview creates th
 - Your repo's code runs only in the build job, which has no Cloudflare token and read-only access to the repo.
 - The deploy job runs only pr-preview's code at the pinned commit and the Wrangler version in its lockfile, installed without install scripts. Wrangler runs from an empty folder with a minimal environment. Wrangler can start workerd, Cloudflare's local runtime, to profile a Worker that fails Cloudflare's startup limits; pr-preview turns workerd off in this job, so the build's code never runs next to the token.
 - Anyone who can push a branch to your repo can get a preview built and uploaded, the same trust GitHub Actions already gives them. Pull requests from forks and from Dependabot get no preview, since they get no secrets.
+- `pull_request_target` runs have the repo's secrets, even for pull requests from forks, so pr-preview uses them only to delete a closed PR's preview. They check out none of the PR's code, and PRs from forks are skipped.
 - A preview Worker runs the code its PR built, with access to the preview D1 databases. A Cloudflare account used only for previews keeps that code, and the token, away from anything else.
 
 ## Limitations

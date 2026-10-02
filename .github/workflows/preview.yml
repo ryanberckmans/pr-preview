@@ -111,9 +111,10 @@ defaults:
 jobs:
   build:
     name: Build
-    # Fork and Dependabot pull requests get no secrets, so they get no preview.
+    # Fork and Dependabot pull requests get no preview, since pull_request gives
+    # them no secrets. pull_request_target would, so forks are skipped there too.
     if: >-
-      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      (!startsWith(github.event_name, 'pull_request') || github.event.pull_request.head.repo.full_name == github.repository)
       && github.actor != 'dependabot[bot]'
       && github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ${{ inputs.runs-on }}
@@ -183,7 +184,9 @@ jobs:
         run: node tool/scripts/plan.mjs
 
       - name: Check out the repo
-        if: steps.plan.outputs.build == 'true'
+        # pull_request_target runs have the repo's secrets, so they never check out a
+        # pull request. The plan only uses them to delete a closed one's preview.
+        if: steps.plan.outputs.build == 'true' && github.event_name != 'pull_request_target'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ steps.plan.outputs.sha }}

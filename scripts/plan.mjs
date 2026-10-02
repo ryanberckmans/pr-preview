@@ -31,9 +31,16 @@ export function plan(env) {
   let sha;
   let prNumber = '';
   let cleanup = false;
-  if (eventName === 'pull_request') {
+  const pullRequest = eventName === 'pull_request' || eventName === 'pull_request_target';
+  if (pullRequest) {
     const pr = event.pull_request ?? {};
     if (pr.head?.repo?.full_name !== repository) return { run: 'false', reason: 'Pull requests from forks get no preview.' };
+    // pull_request_target runs even for a pull request with merge conflicts, which
+    // gets no pull_request runs, but it has the repo's secrets, so it only ever
+    // deletes a closed pull request's preview and never builds one.
+    if (eventName === 'pull_request_target' && event.action !== 'closed') {
+      return { run: 'false', reason: 'pr-preview only deletes previews on pull_request_target, when a pull request closes. Use pull_request for the other types.' };
+    }
     prNumber = String(pr.number ?? '');
     sha = pr.head?.sha;
     alias = `pr-${prNumber}`;
@@ -45,7 +52,7 @@ export function plan(env) {
     sha = readEnv(env, 'GITHUB_SHA');
     alias = branchAlias(defaultBranch);
   } else {
-    return { run: 'false', reason: `pr-preview doesn't handle ${clean(eventName, 40)} events. Use pull_request and push.` };
+    return { run: 'false', reason: `pr-preview doesn't handle ${clean(eventName, 40)} events. Use pull_request, push and, for closed pull requests, pull_request_target.` };
   }
 
   // Public only when GitHub says the repo is public; force-private can keep it private.
@@ -62,7 +69,7 @@ export function plan(env) {
   const base = { run: 'true', 'pr-number': prNumber, sha: sha ?? '', visibility, 'default-branch': defaultBranch };
   try {
     if (forceError) throw forceError;
-    if (!patterns.prNumber.test(prNumber) && eventName === 'pull_request') throw new UserError('The pull request number is missing from the event.');
+    if (!patterns.prNumber.test(prNumber) && pullRequest) throw new UserError('The pull request number is missing from the event.');
     if (!patterns.sha.test(sha ?? '')) throw new UserError('The commit SHA is missing from the event.');
 
     const workerName = readEnv(env, 'IN_WORKER_NAME');

@@ -106,8 +106,29 @@ test('pushes preview the default branch only', (t) => {
   assert.equal(trunk.alias, 'trunk');
 });
 
+test('pull_request_target only deletes a closed PR\'s preview', (t) => {
+  const closed = { ...prEvent(), action: 'closed' };
+  const out = setup(t, { eventName: 'pull_request_target', event: closed });
+  assert.equal(out.run, 'true');
+  assert.equal(out.cleanup, 'true');
+  assert.equal(out.build, 'false');
+  assert.equal(out.alias, 'pr-12');
+  assert.equal(out['pr-number'], '12');
+  const synchronize = setup(t, { eventName: 'pull_request_target', event: prEvent() });
+  assert.equal(synchronize.run, 'false');
+  assert.match(synchronize.reason, /only deletes previews on pull_request_target/);
+  const fork = { ...prEvent({ pull_request: { head: { sha, repo: { full_name: 'someone/app' } } } }), action: 'closed' };
+  assert.equal(setup(t, { eventName: 'pull_request_target', event: fork }).run, 'false');
+  assert.equal(setup(t, { eventName: 'pull_request_target', event: closed, env: { HAS_API_TOKEN: 'false' } }).run, 'false');
+  const noNumber = setup(t, { eventName: 'pull_request_target', event: { ...prEvent({ pull_request: { number: undefined } }), action: 'closed' } });
+  assert.equal(noNumber.run, 'false');
+  assert.match(noNumber.reason, /number is missing/);
+});
+
 test('other events are ignored', (t) => {
-  assert.equal(setup(t, { eventName: 'pull_request_target', event: prEvent() }).run, 'false');
+  const out = setup(t, { eventName: 'issue_comment', event: prEvent() });
+  assert.equal(out.run, 'false');
+  assert.match(out.reason, /doesn't handle issue_comment events/);
 });
 
 test('missing secrets mean not configured, and nothing is built', (t) => {
