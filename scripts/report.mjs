@@ -1,7 +1,7 @@
-// The report job: posts or updates the one pr-preview comment on the PR, saying
-// the preview was deleted once the PR closes, and writes the run summary. It reads
-// job results only; no build output reaches it except the check's last lines,
-// which it shows as plain text.
+// The publish job's last step: posts or updates the one pr-preview comment on the
+// PR, saying the preview was deleted once the PR closes, and writes the run
+// summary. It reads step and job results only; no build output reaches it except
+// the check's last lines, which it shows as plain text.
 import { appendSummary, isMain, log, main, patterns, readEnv } from './lib/common.mjs';
 import { decide, isPreviewComment, readLastGood, renderComment } from './lib/comment.mjs';
 import { createGitHub } from './lib/github.mjs';

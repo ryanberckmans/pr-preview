@@ -1,6 +1,7 @@
-// First step of the build job, before any of the repo's code runs. Works out which
+// First step of both jobs, before any of the repo's code runs. Works out which
 // preview this run makes or, when a pull request closes, deletes, whether it is
-// private, and whether Cloudflare is set up.
+// private, and whether Cloudflare is set up. The publish job plans for itself
+// rather than trusting the build job's outputs.
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import {

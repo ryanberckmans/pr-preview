@@ -90,7 +90,7 @@ test('a superseded run leaves the comment alone', async (t) => {
 });
 
 test('a closed PR\'s comment says its preview was deleted', async (t) => {
-  const closed = { PLAN_CLEANUP: 'true', DEPLOY_RESULT: 'skipped', DEPLOY_STATUS: '', DEPLOY_URL: '', CLEANUP_RESULT: 'success', CLEANUP_STATUS: 'removed' };
+  const closed = { PLAN_CLEANUP: 'true', BUILD_RESULT: 'skipped', DEPLOY_RESULT: 'skipped', DEPLOY_STATUS: '', DEPLOY_URL: '', CLEANUP_RESULT: 'success', CLEANUP_STATUS: 'removed' };
   const existing = `<!-- pr-preview:app-preview -->\n**Preview:** ${url}\n<!-- pr-preview:data {"sha":"${sha}","url":"${url}","at":"2026-10-01T10:00:00.000Z","visibility":"private"} -->`;
   const withComment = github([{ id: 8, user: { login: 'github-actions[bot]' }, body: existing }]);
   const updated = await report(env(t, closed), { fetch: withComment.fetch });
@@ -100,7 +100,7 @@ test('a closed PR\'s comment says its preview was deleted', async (t) => {
 });
 
 test('a closed PR that never had a preview comment gets none', async (t) => {
-  const closed = { PLAN_CLEANUP: 'true', DEPLOY_RESULT: 'skipped', DEPLOY_STATUS: '', DEPLOY_URL: '', CLEANUP_RESULT: 'success', CLEANUP_STATUS: 'absent' };
+  const closed = { PLAN_CLEANUP: 'true', BUILD_RESULT: 'skipped', DEPLOY_RESULT: 'skipped', DEPLOY_STATUS: '', DEPLOY_URL: '', CLEANUP_RESULT: 'success', CLEANUP_STATUS: 'absent' };
   const { fetch, calls } = github([]);
   const result = await report(env(t, closed), { fetch });
   assert.equal(result.action, 'none');

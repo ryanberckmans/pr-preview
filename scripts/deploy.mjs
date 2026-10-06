@@ -1,9 +1,9 @@
-// The deploy job's main step, the only one with the Cloudflare token. It runs
-// pr-preview's own pinned Wrangler on the collected build output; none of the
-// repo's code runs here.
+// The publish job's upload step, one of the two steps with the Cloudflare token.
+// It runs pr-preview's own pinned Wrangler on the collected build output; none of
+// the repo's code runs here.
 //
 // Each preview is a Cloudflare Worker Preview named after its PR or branch, so the
-// cleanup job can delete it when the PR closes. Private previews fail closed:
+// publish job can delete it when the PR closes. Private previews fail closed:
 // nothing is uploaded unless the Worker's workers.dev address and its preview
 // links already redirect to Cloudflare Access, and the new links are checked again
 // after the upload. When a check finds the Worker open, this run's preview is
@@ -161,7 +161,7 @@ export function createWranglerRunner({ token, accountId, tempDir, extraEnv = {} 
   };
 }
 
-const WORKERD_STUB = '#!/bin/sh\necho "workerd is turned off in pr-preview\'s deploy job." >&2\nexit 1\n';
+const WORKERD_STUB = '#!/bin/sh\necho "workerd is turned off in pr-preview\'s publish job." >&2\nexit 1\n';
 
 // Wrangler starts workerd, Cloudflare's local runtime, to profile a Worker that
 // fails Cloudflare's startup limits. That would run the build's code in this job,

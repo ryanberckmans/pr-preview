@@ -1,4 +1,4 @@
-// Runs in the deploy job before the upload. Skips the upload when a newer commit
+// Runs in the publish job before the upload. Skips the upload when a newer commit
 // has landed on the PR or branch, so a slow or re-run job never replaces a newer
 // preview with an older one.
 import { clean, errorMessage, isMain, log, main, readEnv, setOutputs } from './lib/common.mjs';

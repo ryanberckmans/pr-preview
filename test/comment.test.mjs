@@ -36,8 +36,8 @@ test('decide maps job results to one state', () => {
   assert.equal(decide({ ...success, url: 'https://evil.example/' }).kind, 'deploy-failed');
 });
 
-test('decide maps a closed PR\'s cleanup to removed or failed', () => {
-  const closed = { planStatus: 'ok', configured: 'true', cleanup: 'true', buildResult: 'success', deployResult: 'skipped' };
+test('decide maps a closed PR\'s cleanup to removed or failed, with no build', () => {
+  const closed = { planStatus: 'ok', configured: 'true', cleanup: 'true', buildResult: 'skipped', deployResult: 'skipped' };
   assert.deepEqual(decide({ ...closed, cleanupResult: 'success', cleanupStatus: 'removed' }), { kind: 'removed' });
   assert.deepEqual(decide({ ...closed, cleanupResult: 'success', cleanupStatus: 'absent' }), { kind: 'removed' });
   assert.deepEqual(decide({ ...closed, cleanupResult: 'failure', cleanupStatus: 'error', cleanupMessage: 'm' }), { kind: 'remove-failed', message: 'm' });

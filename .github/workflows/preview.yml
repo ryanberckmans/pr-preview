@@ -4,13 +4,13 @@
 # after Cloudflare Access sign-in, and nothing is uploaded unless that is proven
 # first. See README.md for setup.
 #
-# The jobs keep the Cloudflare token away from the repo's code:
+# Two jobs keep the Cloudflare token away from the repo's code:
 #   build   - runs the repo's install, build and check, with no Cloudflare token.
-#   deploy  - uploads the build output with pr-preview's own pinned Wrangler.
-#             None of the repo's code runs in this job, and workerd, which
-#             Wrangler could use to run it locally, is turned off.
-#   cleanup - deletes the preview of a closed PR.
-#   report  - posts or updates the PR comment.
+#             A closed PR skips it, since there is nothing to build.
+#   publish - runs only pr-preview's own code. It uploads the build output with
+#             pr-preview's pinned Wrangler, or deletes a closed PR's preview,
+#             then posts or updates the PR comment. workerd, which Wrangler
+#             could use to run the build's code locally, is turned off.
 name: pr-preview
 
 on:
@@ -94,13 +94,13 @@ on:
     outputs:
       url:
         description: The preview link.
-        value: ${{ jobs.deploy.outputs.url }}
+        value: ${{ jobs.publish.outputs.url }}
       deployment-id:
         description: The new deployment of the preview.
-        value: ${{ jobs.deploy.outputs.deployment-id }}
+        value: ${{ jobs.publish.outputs.deployment-id }}
       visibility:
         description: private or public.
-        value: ${{ jobs.build.outputs.visibility }}
+        value: ${{ jobs.publish.outputs.visibility || jobs.build.outputs.visibility }}
 
 permissions: {}
 
@@ -112,31 +112,21 @@ jobs:
   build:
     name: Build
     # Fork and Dependabot pull requests get no preview, since pull_request gives
-    # them no secrets. pull_request_target would, so forks are skipped there too.
+    # them no secrets. A closed pull request has nothing to build: the publish
+    # job deletes its preview on its own. pull_request_target runs never build.
     if: >-
       (!startsWith(github.event_name, 'pull_request') || github.event.pull_request.head.repo.full_name == github.repository)
       && github.actor != 'dependabot[bot]'
       && github.event.pull_request.user.login != 'dependabot[bot]'
+      && github.event_name != 'pull_request_target'
+      && github.event.action != 'closed'
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read # to check out the repo
     outputs:
       run: ${{ steps.plan.outputs.run }}
-      cleanup: ${{ steps.plan.outputs.cleanup }}
-      status: ${{ steps.plan.outputs.status }}
-      message: ${{ steps.plan.outputs.message }}
-      build: ${{ steps.plan.outputs.build }}
-      configured: ${{ steps.plan.outputs.configured }}
-      missing: ${{ steps.plan.outputs.missing }}
       visibility: ${{ steps.plan.outputs.visibility }}
-      worker: ${{ steps.plan.outputs.worker }}
-      alias: ${{ steps.plan.outputs.alias }}
-      main-alias: ${{ steps.plan.outputs.main-alias }}
-      sha: ${{ steps.plan.outputs.sha }}
-      pr-number: ${{ steps.plan.outputs.pr-number }}
-      default-branch: ${{ steps.plan.outputs.default-branch }}
-      team-domain: ${{ steps.plan.outputs.team-domain }}
       install-outcome: ${{ steps.install.outcome }}
       build-outcome: ${{ steps.build.outcome }}
       check-status: ${{ steps.check-result.outputs.status }}
@@ -185,7 +175,7 @@ jobs:
 
       - name: Check out the repo
         # pull_request_target runs have the repo's secrets, so they never check out a
-        # pull request. The plan only uses them to delete a closed one's preview.
+        # pull request. This job doesn't run for them; this is a second guard.
         if: steps.plan.outputs.build == 'true' && github.event_name != 'pull_request_target'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -237,7 +227,7 @@ jobs:
           BUNDLE_DIR: ${{ runner.temp }}/pr-preview-bundle
         run: node tool/scripts/bundle.mjs
 
-      - name: Hand the build output to the deploy job
+      - name: Hand the build output to the publish job
         if: steps.plan.outputs.build == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -247,21 +237,27 @@ jobs:
           include-hidden-files: true
           retention-days: 1
 
-  deploy:
-    name: Deploy
+  publish:
+    name: Publish
     needs: build
-    if: needs.build.outputs.build == 'true'
+    # Runs after a failed build too, to say so on the PR, and on its own when a
+    # pull request closes. Not for runs that were cancelled or superseded, nor
+    # for forks and Dependabot.
+    if: >-
+      !cancelled()
+      && (!startsWith(github.event_name, 'pull_request') || github.event.pull_request.head.repo.full_name == github.repository)
+      && github.actor != 'dependabot[bot]'
+      && github.event.pull_request.user.login != 'dependabot[bot]'
+      && (needs.build.outputs.run == 'true' || github.event_name == 'pull_request_target' || github.event.action == 'closed')
     runs-on: ${{ inputs.runs-on }}
-    timeout-minutes: 15
+    timeout-minutes: 25
     permissions:
       contents: read # to check out pr-preview and read the branch head
-      pull-requests: read # to skip the upload when a newer commit is on the PR
+      pull-requests: write # to post the preview comment, and to skip the upload when a newer commit is on the PR
     outputs:
-      status: ${{ steps.deploy.outputs.status || steps.fresh.outputs.status }}
-      message: ${{ steps.deploy.outputs.message || steps.fresh.outputs.message }}
       url: ${{ steps.deploy.outputs.url }}
-      main-url: ${{ steps.deploy.outputs.main-url }}
       deployment-id: ${{ steps.deploy.outputs.deployment-id }}
+      visibility: ${{ steps.plan.outputs.visibility }}
     steps:
       - name: Check which pr-preview is running
         env:
@@ -287,20 +283,41 @@ jobs:
           node-version: '24'
           package-manager-cache: false
 
+      # Plans again from the event rather than taking the build job's word, so
+      # nothing from the job that ran the repo's code picks the Worker, the
+      # preview or its visibility.
+      - name: Plan
+        id: plan
+        env:
+          HAS_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+          HAS_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+          IN_WORKER_NAME: ${{ inputs.worker-name }}
+          IN_WRANGLER_CONFIG: ${{ inputs.wrangler-config }}
+          IN_ACCESS_TEAM_DOMAIN: ${{ inputs.access-team-domain }}
+          IN_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+          IN_D1: ${{ inputs.d1 }}
+          IN_PREVIEW_VARS: ${{ inputs.preview-vars }}
+          IN_FORCE_PRIVATE: ${{ inputs.force-private }}
+        run: node tool/scripts/plan.mjs
+
       - name: Install Wrangler
+        id: wrangler
+        if: steps.plan.outputs.build == 'true' && needs.build.result == 'success'
         working-directory: tool
         run: npm ci --ignore-scripts --no-audit --no-fund
 
       - name: Check for a newer commit
         id: fresh
+        if: steps.wrangler.outcome == 'success'
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          PLAN_SHA: ${{ needs.build.outputs.sha }}
-          PLAN_PR_NUMBER: ${{ needs.build.outputs.pr-number }}
-          PLAN_DEFAULT_BRANCH: ${{ needs.build.outputs.default-branch }}
+          PLAN_SHA: ${{ steps.plan.outputs.sha }}
+          PLAN_PR_NUMBER: ${{ steps.plan.outputs.pr-number }}
+          PLAN_DEFAULT_BRANCH: ${{ steps.plan.outputs.default-branch }}
         run: node tool/scripts/fresh.mjs
 
       - name: Download the build output
+        id: download
         if: steps.fresh.outputs.fresh == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -310,125 +327,64 @@ jobs:
       - name: Deploy
         id: deploy
         if: steps.fresh.outputs.fresh == 'true'
+        timeout-minutes: 15
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          PLAN_VISIBILITY: ${{ needs.build.outputs.visibility }}
-          PLAN_WORKER: ${{ needs.build.outputs.worker }}
-          PLAN_ALIAS: ${{ needs.build.outputs.alias }}
-          PLAN_MAIN_ALIAS: ${{ needs.build.outputs.main-alias }}
-          PLAN_SHA: ${{ needs.build.outputs.sha }}
-          PLAN_PR_NUMBER: ${{ needs.build.outputs.pr-number }}
-          PLAN_TEAM_DOMAIN: ${{ needs.build.outputs.team-domain }}
+          PLAN_VISIBILITY: ${{ steps.plan.outputs.visibility }}
+          PLAN_WORKER: ${{ steps.plan.outputs.worker }}
+          PLAN_ALIAS: ${{ steps.plan.outputs.alias }}
+          PLAN_MAIN_ALIAS: ${{ steps.plan.outputs.main-alias }}
+          PLAN_SHA: ${{ steps.plan.outputs.sha }}
+          PLAN_PR_NUMBER: ${{ steps.plan.outputs.pr-number }}
+          PLAN_TEAM_DOMAIN: ${{ steps.plan.outputs.team-domain }}
           IN_D1: ${{ inputs.d1 }}
           IN_PREVIEW_VARS: ${{ inputs.preview-vars }}
           BUNDLE_DIR: ${{ runner.temp }}/pr-preview-bundle
         run: node tool/scripts/deploy.mjs
 
-  cleanup:
-    name: Clean up
-    needs: build
-    if: needs.build.outputs.cleanup == 'true'
-    runs-on: ${{ inputs.runs-on }}
-    timeout-minutes: 5
-    permissions:
-      contents: read # to check out pr-preview
-    outputs:
-      status: ${{ steps.cleanup.outputs.status }}
-      message: ${{ steps.cleanup.outputs.message }}
-    steps:
-      - name: Check which pr-preview is running
-        env:
-          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
-          WORKFLOW_SHA: ${{ job.workflow_sha }}
-        run: |
-          if [[ ! "$WORKFLOW_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ || ! "$WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::GitHub didn't report which pr-preview commit is running (job.workflow_repository and job.workflow_sha), so pr-preview stops here. GitHub Enterprise Server doesn't provide them."
-            exit 1
-          fi
-
-      - name: Check out pr-preview
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ job.workflow_repository }}
-          ref: ${{ job.workflow_sha }}
-          path: tool
-          persist-credentials: false
-
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '24'
-          package-manager-cache: false
-
       - name: Delete the preview
         id: cleanup
+        if: steps.plan.outputs.cleanup == 'true'
+        timeout-minutes: 5
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          PLAN_WORKER: ${{ needs.build.outputs.worker }}
-          PLAN_ALIAS: ${{ needs.build.outputs.alias }}
+          PLAN_WORKER: ${{ steps.plan.outputs.worker }}
+          PLAN_ALIAS: ${{ steps.plan.outputs.alias }}
         run: node tool/scripts/cleanup.mjs
 
-  report:
-    name: Report
-    needs: [build, deploy, cleanup]
-    if: ${{ !cancelled() && needs.build.outputs.run == 'true' }}
-    runs-on: ${{ inputs.runs-on }}
-    timeout-minutes: 5
-    permissions:
-      contents: read # to check out pr-preview
-      pull-requests: write # to post the preview comment
-    steps:
-      - name: Check which pr-preview is running
-        env:
-          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
-          WORKFLOW_SHA: ${{ job.workflow_sha }}
-        run: |
-          if [[ ! "$WORKFLOW_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ || ! "$WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::GitHub didn't report which pr-preview commit is running (job.workflow_repository and job.workflow_sha), so pr-preview stops here. GitHub Enterprise Server doesn't provide them."
-            exit 1
-          fi
-
-      - name: Check out pr-preview
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ job.workflow_repository }}
-          ref: ${{ job.workflow_sha }}
-          path: tool
-          persist-credentials: false
-
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '24'
-          package-manager-cache: false
-
+      # Runs after a failed upload or deletion too, which still fail the job.
       - name: Comment on the pull request
+        if: ${{ !cancelled() && steps.plan.outputs.run == 'true' }}
+        timeout-minutes: 5
         env:
           GITHUB_TOKEN: ${{ github.token }}
           TOOL_REPOSITORY: ${{ job.workflow_repository }}
           IN_WORKER_NAME: ${{ inputs.worker-name }}
-          PLAN_STATUS: ${{ needs.build.outputs.status }}
-          PLAN_MESSAGE: ${{ needs.build.outputs.message }}
-          PLAN_CONFIGURED: ${{ needs.build.outputs.configured }}
-          PLAN_MISSING: ${{ needs.build.outputs.missing }}
-          PLAN_VISIBILITY: ${{ needs.build.outputs.visibility }}
-          PLAN_SHA: ${{ needs.build.outputs.sha }}
-          PLAN_PR_NUMBER: ${{ needs.build.outputs.pr-number }}
+          PLAN_STATUS: ${{ steps.plan.outputs.status }}
+          PLAN_MESSAGE: ${{ steps.plan.outputs.message }}
+          PLAN_CONFIGURED: ${{ steps.plan.outputs.configured }}
+          PLAN_MISSING: ${{ steps.plan.outputs.missing }}
+          PLAN_VISIBILITY: ${{ steps.plan.outputs.visibility }}
+          PLAN_SHA: ${{ steps.plan.outputs.sha }}
+          PLAN_PR_NUMBER: ${{ steps.plan.outputs.pr-number }}
           BUILD_RESULT: ${{ needs.build.result }}
           INSTALL_OUTCOME: ${{ needs.build.outputs.install-outcome }}
           BUILD_OUTCOME: ${{ needs.build.outputs.build-outcome }}
           CHECK_COMMAND: ${{ inputs.check-command }}
           CHECK_STATUS: ${{ needs.build.outputs.check-status }}
           CHECK_TAIL: ${{ needs.build.outputs.check-tail }}
-          DEPLOY_RESULT: ${{ needs.deploy.result }}
-          DEPLOY_STATUS: ${{ needs.deploy.outputs.status }}
-          DEPLOY_MESSAGE: ${{ needs.deploy.outputs.message }}
-          DEPLOY_URL: ${{ needs.deploy.outputs.url }}
-          DEPLOY_MAIN_URL: ${{ needs.deploy.outputs.main-url }}
-          PLAN_CLEANUP: ${{ needs.build.outputs.cleanup }}
-          CLEANUP_RESULT: ${{ needs.cleanup.result }}
-          CLEANUP_STATUS: ${{ needs.cleanup.outputs.status }}
-          CLEANUP_MESSAGE: ${{ needs.cleanup.outputs.message }}
+          # The upload failed if any of its steps did.
+          DEPLOY_RESULT: >-
+            ${{ (steps.wrangler.outcome == 'failure' || steps.fresh.outcome == 'failure' || steps.download.outcome == 'failure' || steps.deploy.outcome == 'failure')
+            && 'failure' || steps.deploy.outcome }}
+          DEPLOY_STATUS: ${{ steps.deploy.outputs.status || steps.fresh.outputs.status }}
+          DEPLOY_MESSAGE: ${{ steps.deploy.outputs.message || steps.fresh.outputs.message }}
+          DEPLOY_URL: ${{ steps.deploy.outputs.url }}
+          DEPLOY_MAIN_URL: ${{ steps.deploy.outputs.main-url }}
+          PLAN_CLEANUP: ${{ steps.plan.outputs.cleanup }}
+          CLEANUP_RESULT: ${{ steps.cleanup.outcome }}
+          CLEANUP_STATUS: ${{ steps.cleanup.outputs.status }}
+          CLEANUP_MESSAGE: ${{ steps.cleanup.outputs.message }}
         run: node tool/scripts/report.mjs

@@ -10,12 +10,12 @@ Each PR gets a Cloudflare [Worker Preview](https://developers.cloudflare.com/wor
 
 If an install, build or upload fails, the comment says so and keeps pointing at the last preview that worked. Each Worker has its own comment, so one repo can call pr-preview for several apps. An optional check command (tests, a performance budget) runs after the build; its result goes in the comment and never blocks the preview.
 
-The workflow's jobs keep your repo's code away from the Cloudflare token:
+Two jobs keep your repo's code away from the Cloudflare token:
 
 - **build** runs your install, build and check commands, with no Cloudflare token, then collects the Wrangler config, the built Worker, its static assets and its D1 migrations.
-- **deploy** uploads that output from a fresh runner with pr-preview's own pinned Wrangler. None of your repo's code runs in it.
-- **cleanup** deletes a closed PR's preview. It needs no build output.
-- **report** posts or updates the PR comment.
+- **publish** uploads that output from a fresh runner with pr-preview's own pinned Wrangler, or deletes a closed PR's preview, then posts or updates the PR comment. None of your repo's code runs in it.
+
+A push runs both jobs. A closed PR runs only publish, since deleting its preview needs no build.
 
 ## Privacy
 
@@ -128,7 +128,7 @@ Previews get no secrets. They run in their own Worker, and pr-preview creates th
 ## Security
 
 - Your repo's code runs only in the build job, which has no Cloudflare token and read-only access to the repo.
-- The deploy job runs only pr-preview's code at the pinned commit and the Wrangler version in its lockfile, installed without install scripts. Wrangler runs from an empty folder with a minimal environment. Wrangler can start workerd, Cloudflare's local runtime, to profile a Worker that fails Cloudflare's startup limits; pr-preview turns workerd off in this job, so the build's code never runs next to the token.
+- The publish job runs only pr-preview's code at the pinned commit and the Wrangler version in its lockfile, installed without install scripts. It works out the Worker, the preview's name and its visibility from the event itself, never from the build job. Only its upload and delete steps get the Cloudflare token, and the comment step gets only the GitHub token. Wrangler runs from an empty folder with a minimal environment. Wrangler can start workerd, Cloudflare's local runtime, to profile a Worker that fails Cloudflare's startup limits; pr-preview turns workerd off in this job, so the build's code never runs next to the token.
 - Anyone who can push a branch to your repo can get a preview built and uploaded, the same trust GitHub Actions already gives them. Pull requests from forks and from Dependabot get no preview, since they get no secrets.
 - `pull_request_target` runs have the repo's secrets, even for pull requests from forks, so pr-preview uses them only to delete a closed PR's preview. They check out none of the PR's code, and PRs from forks are skipped.
 - A preview Worker runs the code its PR built, with access to the preview D1 databases. A Cloudflare account used only for previews keeps that code, and the token, away from anything else.
@@ -141,7 +141,7 @@ Previews get no secrets. They run in their own Worker, and pr-preview creates th
 - Worker Previews are an open beta. Cloudflare has open reports of a deleted preview's link still answering for hours ([workers-sdk#15945](https://github.com/cloudflare/workers-sdk/issues/15945)); a private preview's link still requires sign-in meanwhile.
 - A Worker keeps at most 100 previews on Cloudflare's Free plan (500 on paid plans). Beyond that, Cloudflare deletes the least recently updated one.
 - Links made by pr-preview before it used Worker Previews are aliased Version URLs. Cloudflare can't delete them one at a time, and doesn't document which of the two answers when a new preview has the same name. When upgrading, change `worker-name` so previews start in a new Worker; open pull requests keep their old links until their next push. Delete the old Worker (**Workers & Pages → old Worker → Settings → Delete**) once you no longer need those links. Without account-wide Access, protect the new Worker as in [step 3](#3-sign-in-for-a-new-private-worker).
-- In private repos, the runs use the repo owner's GitHub Actions minutes.
+- In private repos, the runs use the repo owner's GitHub Actions minutes: two jobs for each push, one when a PR closes.
 
 ## Development
 

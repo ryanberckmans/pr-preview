@@ -1,4 +1,4 @@
-// The cleanup job's one step: when a pull request closes, deletes its preview,
+// The publish job's step when a pull request closes: deletes its preview,
 // with all its deployments, from Cloudflare. It needs no build output and no
 // Wrangler, just pr-preview's own API client.
 import { UserError, clean, errorMessage, isMain, log, main, patterns, readEnv, redact, setOutputs } from './lib/common.mjs';

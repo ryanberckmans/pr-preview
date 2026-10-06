@@ -1,6 +1,6 @@
 // Runs in the build job after the build. Copies what the upload needs (the
 // Wrangler config, the built Worker, its assets and D1 migrations) into one folder
-// that is handed to the deploy job, which never runs the repo's code.
+// that is handed to the publish job, which never runs the repo's code.
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { UserError, clean, isInside, isMain, log, main, parseD1Input, readEnv, resolveUnder, toPosix } from './lib/common.mjs';
