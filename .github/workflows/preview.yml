@@ -75,10 +75,15 @@ on:
         required: false
         default: false
       runs-on:
-        description: Runner for the jobs.
+        description: Runner for the build job and, unless overridden, the publish job.
         type: string
         required: false
         default: ubuntu-24.04
+      publish-runs-on:
+        description: Optional runner for publishing, cleanup and PR comments. Empty uses runs-on. ubuntu-slim has a 15-minute job limit.
+        type: string
+        required: false
+        default: ''
       timeout-minutes:
         description: Time limit for the build job.
         type: number
@@ -249,8 +254,8 @@ jobs:
       && github.actor != 'dependabot[bot]'
       && github.event.pull_request.user.login != 'dependabot[bot]'
       && (needs.build.outputs.run == 'true' || github.event_name == 'pull_request_target' || github.event.action == 'closed')
-    runs-on: ${{ inputs.runs-on }}
-    timeout-minutes: 25
+    runs-on: ${{ inputs.publish-runs-on || inputs.runs-on }}
+    timeout-minutes: ${{ (inputs.publish-runs-on || inputs.runs-on) == 'ubuntu-slim' && 15 || 25 }}
     permissions:
       contents: read # to check out pr-preview and read the branch head
       pull-requests: write # to post the preview comment, and to skip the upload when a newer commit is on the PR
@@ -327,7 +332,8 @@ jobs:
       - name: Deploy
         id: deploy
         if: steps.fresh.outputs.fresh == 'true'
-        timeout-minutes: 15
+        # Leave time for setup and the failure comment within slim's hard limit.
+        timeout-minutes: ${{ (inputs.publish-runs-on || inputs.runs-on) == 'ubuntu-slim' && 10 || 15 }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -357,7 +363,7 @@ jobs:
       # Runs after a failed upload or deletion too, which still fail the job.
       - name: Comment on the pull request
         if: ${{ !cancelled() && steps.plan.outputs.run == 'true' }}
-        timeout-minutes: 5
+        timeout-minutes: ${{ (inputs.publish-runs-on || inputs.runs-on) == 'ubuntu-slim' && 3 || 5 }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           TOOL_REPOSITORY: ${{ job.workflow_repository }}

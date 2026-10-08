@@ -22,6 +22,7 @@ jobs:
       contents: read # to check out the repo
       pull-requests: write # to post the preview comment
     with:
+      publish-runs-on: ubuntu-slim
       worker-name: pr-preview-self-test
       working-directory: test/fixture
       wrangler-config: dist/worker/wrangler.json

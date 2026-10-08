@@ -109,10 +109,19 @@ If Access is ever turned off, the next run posts no link and says why.
 | `d1` | `{}` | JSON mapping each D1 binding to its preview database: `database_name`, and optionally `migrations_dir` and `database_id`. Missing databases are created, and migrations are applied before each upload. Every D1 binding in the config needs an entry. |
 | `preview-vars` | `{}` | JSON object of the only plain-text variables previews get. |
 | `force-private` | `false` | Keep previews private in a public repo. |
-| `runs-on` | `ubuntu-24.04` | Runner for the jobs. |
+| `runs-on` | `ubuntu-24.04` | Runner for the build job and, unless overridden, the publish job. |
+| `publish-runs-on` | `''` | Optional runner for publishing, cleanup and PR comments. Empty uses `runs-on`. |
 | `timeout-minutes` | `20` | Time limit for the build job. |
 
 Outputs: `url` (the preview link), `deployment-id` and `visibility`.
+
+To use GitHub's less expensive runner for publishing while keeping the build on
+`ubuntu-24.04`, add `publish-runs-on: ubuntu-slim` to the caller's `with` block.
+Existing callers keep their current runners. The two jobs remain separate.
+GitHub limits `ubuntu-slim` jobs to 15 minutes; on that runner, pr-preview limits
+the upload step to 10 minutes and the comment step to 3 minutes so an upload
+timeout can still be reported. Use the standard runner for longer uploads or D1
+migrations. Other runners retain the 25-minute publish job limit.
 
 ## What a preview gets
 
@@ -150,4 +159,4 @@ npm ci --ignore-scripts
 npm test
 ```
 
-The tests run the pinned Wrangler's `preview` command against a local stand-in for Cloudflare's API. The self-test workflow runs pr-preview on the small Worker in `test/fixture`.
+The tests run the pinned Wrangler's `preview` command against a local stand-in for Cloudflare's API. The self-test workflow runs pr-preview on the small Worker in `test/fixture`, with its publish job on `ubuntu-slim`.
