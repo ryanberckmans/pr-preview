@@ -12,6 +12,6 @@
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
-    "wrangler": "4.138.0"
+    "wrangler": "4.145.0"
   }
 }
